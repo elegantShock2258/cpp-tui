@@ -27,14 +27,32 @@ No external dependencies are required.
 
 #### CMake
 
-If using CMake, you can add it as an interface library:
+**Using `add_subdirectory`**
+
+If you include `cpp-tui` as a Git submodule or copy the repository into your project, you can add it directly:
 
 ```cmake
-add_library(cpptui INTERFACE)
-target_include_directories(cpptui INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/path/to/cpptui)
+add_subdirectory(path/to/cpp-tui)
 
 add_executable(my_app main.cpp)
-target_link_libraries(my_app PRIVATE cpptui)
+target_link_libraries(my_app PRIVATE cpptui::cpptui)
+```
+
+**Using `FetchContent`**
+
+You can fetch `cpp-tui` directly from GitHub using CMake's `FetchContent`:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    cpptui
+    GIT_REPOSITORY https://github.com/jonoton/cpp-tui.git
+    GIT_TAG        main # or a specific version tag
+)
+FetchContent_MakeAvailable(cpptui)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE cpptui::cpptui)
 ```
 
 #### Direct File

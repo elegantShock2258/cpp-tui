@@ -78,8 +78,23 @@ This project uses **CMake**.
 
 ## Quick Start
 
-1. Copy `cpptui.hpp` to your project.
-2. Include it and create your `App`:
+You can use `cpp-tui` by simply copying `cpptui.hpp` to your project. Alternatively, if you use **CMake**, you can integrate it via `add_subdirectory` or `FetchContent`:
+
+```cmake
+# Example using FetchContent
+include(FetchContent)
+FetchContent_Declare(
+    cpptui
+    GIT_REPOSITORY https://github.com/jonoton/cpp-tui.git
+    GIT_TAG        main
+)
+FetchContent_MakeAvailable(cpptui)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE cpptui::cpptui)
+```
+
+Then, include the header and create your `App`:
 
 ```cpp
 #include "cpptui.hpp"

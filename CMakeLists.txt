@@ -8,7 +8,9 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-include_directories(${PROJECT_SOURCE_DIR})
+add_library(cpptui INTERFACE)
+add_library(cpptui::cpptui ALIAS cpptui)
+target_include_directories(cpptui INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 option(CPPTUI_BUILD_EXAMPLES "Build the example programs" ON)
 
@@ -17,5 +19,6 @@ if(CPPTUI_BUILD_EXAMPLES)
     foreach(EXAMPLE_SOURCE ${EXAMPLE_SOURCES})
         get_filename_component(EXAMPLE_NAME ${EXAMPLE_SOURCE} NAME_WE)
         add_executable(${EXAMPLE_NAME} ${EXAMPLE_SOURCE})
+        target_link_libraries(${EXAMPLE_NAME} PRIVATE cpptui::cpptui)
     endforeach()
 endif()
