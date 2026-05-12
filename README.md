@@ -19,6 +19,7 @@ A lightweight, single-header C++ TUI (Text User Interface) library.
     - **Focus Management**: Robust tab-key navigation (forward/reverse via Shift+Tab), click-to-focus support, and safe handling of nested/hidden widgets.
     - **Mouse**: Full tracking support including click, drag, scroll wheel, and hover.
     - **Resize**: Automatic layout updates on window resize (SIGWINCH).
+    - **Cross-Thread Updates**: Thread-safe `update()` and `post()` methods to trigger redraws or schedule work from background threads.
 - **Rich Widget Library**:
     - **Core**: `Label`, `Paragraph`, `Button`, `Input` (with Regex & Placeholders), `TextArea` (Multiline Editor), `Checkbox`, `ProgressBar`, `Sparkline`, `Spinner`, `Border`.
     - **Advanced Inputs**:

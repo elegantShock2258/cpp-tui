@@ -8,6 +8,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>
 #endif
 
 #include <iostream>
@@ -31,6 +32,7 @@
 #include <filesystem>
 #include <atomic>
 #include <optional>
+#include <mutex>
 
 namespace cpptui
 {
@@ -83,8 +85,8 @@ namespace cpptui
     };
 
     constexpr int VERSION_MAJOR = 1;
-    constexpr int VERSION_MINOR = 3;
-    constexpr int VERSION_PATCH = 2;
+    constexpr int VERSION_MINOR = 4;
+    constexpr int VERSION_PATCH = 0;
 
     inline std::string version()
     {
@@ -101,6 +103,13 @@ namespace cpptui
     }
 
     inline std::function<void()> quit_app;
+
+    // Cross-thread wakeup mechanism for update()/post()
+#ifdef _WIN32
+    inline HANDLE g_wakeup_event = NULL;
+#else
+    inline int g_wakeup_pipe[2] = {-1, -1};
+#endif
 
     // ========================================================================
     // UTF-8 and Wide Character Utilities
@@ -758,7 +767,8 @@ namespace cpptui
         Mouse,  ///< Mouse movement or click
         Resize, ///< Terminal resize
         Quit,   ///< Application quit request
-        Paste   ///< Paste from clipboard (bracketed paste)
+        Paste,  ///< Paste from clipboard (bracketed paste)
+        Wakeup  ///< Cross-thread wakeup (from update()/post())
     };
 
     /// @brief Represents an input event (keyboard, mouse, or system)
@@ -2142,6 +2152,10 @@ namespace cpptui
 
             originalInCP = GetConsoleCP();
             SetConsoleCP(CP_UTF8);
+
+            // Create wakeup event for cross-thread update()/post()
+            if (!g_wakeup_event)
+                g_wakeup_event = CreateEvent(NULL, FALSE, FALSE, NULL); // Auto-reset
 #else
             struct termios raw;
             tcgetattr(STDIN_FILENO, &raw);
@@ -2157,6 +2171,16 @@ namespace cpptui
             raw.c_cc[VTIME] = 1;
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
             signal(SIGWINCH, handle_winch);
+
+            // Create wakeup pipe for cross-thread update()/post()
+            if (g_wakeup_pipe[0] == -1)
+            {
+                if (pipe(g_wakeup_pipe) == 0)
+                {
+                    fcntl(g_wakeup_pipe[0], F_SETFL, O_NONBLOCK);
+                    fcntl(g_wakeup_pipe[1], F_SETFL, O_NONBLOCK);
+                }
+            }
             write("\033[?1003h\033[?1006h\033[?2004h"); // Enable mouse reporting (all motion) + SGR + Bracketed Paste
 #endif
             write("\033[?1049h"); // Enable alternate screen buffer
@@ -2179,9 +2203,25 @@ namespace cpptui
             HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
             SetConsoleMode(hIn, originalInMode | ENABLE_EXTENDED_FLAGS);
             SetConsoleCP(originalInCP);
+
+            // Close wakeup event
+            if (g_wakeup_event)
+            {
+                CloseHandle(g_wakeup_event);
+                g_wakeup_event = NULL;
+            }
 #else
             write("\033[?1003l\033[?1006l\033[?2004l"); // Disable mouse and bracketed paste
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &originalTermios);
+
+            // Close wakeup pipe
+            if (g_wakeup_pipe[0] != -1)
+            {
+                close(g_wakeup_pipe[0]);
+                close(g_wakeup_pipe[1]);
+                g_wakeup_pipe[0] = -1;
+                g_wakeup_pipe[1] = -1;
+            }
 #endif
         }
 
@@ -2443,10 +2483,25 @@ namespace cpptui
             // VT Input Path - VT sequences arrive as KEY_EVENT records
             if (vt_input_supported_)
             {
-                // Wait for input
+                // Wait for input or wakeup event
                 if (timeout_ms >= 0)
                 {
-                    DWORD waitRes = WaitForSingleObject(hIn, timeout_ms);
+                    DWORD waitRes;
+                    if (g_wakeup_event)
+                    {
+                        HANDLE handles[2] = {hIn, g_wakeup_event};
+                        waitRes = WaitForMultipleObjects(2, handles, FALSE, timeout_ms);
+                        if (waitRes == WAIT_OBJECT_0 + 1)
+                        {
+                            // Wakeup event signaled
+                            event.type = EventType::Wakeup;
+                            return event;
+                        }
+                    }
+                    else
+                    {
+                        waitRes = WaitForSingleObject(hIn, timeout_ms);
+                    }
                     if (waitRes == WAIT_TIMEOUT)
                         return event;
                 }
@@ -2592,7 +2647,21 @@ namespace cpptui
 
             if (legacy_timeout >= 0)
             {
-                DWORD result = WaitForSingleObject(hIn, legacy_timeout);
+                DWORD result;
+                if (g_wakeup_event)
+                {
+                    HANDLE handles[2] = {hIn, g_wakeup_event};
+                    result = WaitForMultipleObjects(2, handles, FALSE, legacy_timeout);
+                    if (result == WAIT_OBJECT_0 + 1)
+                    {
+                        event.type = EventType::Wakeup;
+                        return event;
+                    }
+                }
+                else
+                {
+                    result = WaitForSingleObject(hIn, legacy_timeout);
+                }
                 if (result == WAIT_TIMEOUT)
                     return event;
             }
@@ -2771,18 +2840,27 @@ namespace cpptui
                 FD_ZERO(&fds);
                 FD_SET(STDIN_FILENO, &fds);
 
+                // Also watch the wakeup pipe for cross-thread update()/post()
+                int nfds = STDIN_FILENO + 1;
+                if (g_wakeup_pipe[0] != -1)
+                {
+                    FD_SET(g_wakeup_pipe[0], &fds);
+                    if (g_wakeup_pipe[0] >= nfds)
+                        nfds = g_wakeup_pipe[0] + 1;
+                }
+
                 int ret;
                 if (timeout_ms >= 0)
                 {
                     struct timeval tv;
                     tv.tv_sec = timeout_ms / 1000;
                     tv.tv_usec = (timeout_ms % 1000) * 1000;
-                    ret = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
+                    ret = select(nfds, &fds, NULL, NULL, &tv);
                 }
                 else
                 {
-                    // Block indefinitely until input or signal
-                    ret = select(STDIN_FILENO + 1, &fds, NULL, NULL, NULL);
+                    // Block indefinitely until input, wakeup, or signal
+                    ret = select(nfds, &fds, NULL, NULL, NULL);
                 }
 
                 if (ret == 0)
@@ -2798,6 +2876,17 @@ namespace cpptui
                         event.y = size.second;
                         return event;
                     }
+                    return event;
+                }
+
+                // Check if wakeup pipe is readable
+                if (g_wakeup_pipe[0] != -1 && FD_ISSET(g_wakeup_pipe[0], &fds))
+                {
+                    // Drain the pipe
+                    char buf[64];
+                    while (read(g_wakeup_pipe[0], buf, sizeof(buf)) > 0) {}
+
+                    event.type = EventType::Wakeup;
                     return event;
                 }
             }
@@ -4975,6 +5064,12 @@ namespace cpptui
 
         /// @brief Get the button label
         const std::string &get_label() const { return label_; }
+
+        /// @brief Set the button label
+        void set_label(const std::string &label) { label_ = label; }
+
+        /// @brief Set the on_click callback
+        void set_on_click(std::function<void()> on_click) { on_click_ = on_click; }
 
         // Use defaults from Theme if not manually overridden
         Color bg_color = {0, 0, 0, true};
@@ -17325,6 +17420,35 @@ namespace cpptui
             }
         }
 
+        /// @brief Wake the event loop and trigger a redraw on the next iteration.
+        /// Thread-safe. Can be called from any thread.
+        void update()
+        {
+#ifdef _WIN32
+            if (g_wakeup_event)
+                SetEvent(g_wakeup_event);
+#else
+            if (g_wakeup_pipe[1] != -1)
+            {
+                char c = 1;
+                // Write is non-blocking; ignore failure (pipe full means wakeup is already pending)
+                (void)write(g_wakeup_pipe[1], &c, 1);
+            }
+#endif
+        }
+
+        /// @brief Schedule a callback to run on the main UI thread, then redraw.
+        /// Thread-safe. Use this to safely modify widgets from background threads.
+        /// @param callback Function to execute on the UI thread
+        void post(std::function<void()> callback)
+        {
+            {
+                std::lock_guard<std::mutex> lock(post_mutex_);
+                posted_callbacks_.push_back(std::move(callback));
+            }
+            update();
+        }
+
         static void update_screen_size(int w, int h = 0)
         {
             if (w < 80)
@@ -17444,6 +17568,74 @@ namespace cpptui
                     last_dialog_count = dialog_stack.size();
                     needs_render = true;
                 }
+                auto now = std::chrono::steady_clock::now();
+                int min_wait_ms = -1; // Default: wait indefinitely
+
+                // 0. Drain and execute posted callbacks (from post())
+                {
+                    std::vector<std::function<void()>> callbacks;
+                    {
+                        std::lock_guard<std::mutex> lock(post_mutex_);
+                        callbacks.swap(posted_callbacks_);
+                    }
+                    if (!callbacks.empty())
+                    {
+                        for (auto &cb : callbacks)
+                        {
+                            if (cb)
+                                cb();
+                        }
+                        needs_render = true;
+                    }
+                }
+
+                // 1. Handle Additional Timers
+                for (auto &t : timers_)
+                {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - t.last_fire);
+                    if (elapsed >= t.interval)
+                    {
+                        if (t.callback)
+                        {
+                            t.callback();
+                            needs_render = true;
+                        }
+                        t.last_fire = now;
+                        elapsed = std::chrono::milliseconds(0);
+                    }
+
+                    int wait = (int)(t.interval - elapsed).count();
+                    if (wait < 0)
+                        wait = 0;
+                    if (min_wait_ms == -1 || wait < min_wait_ms)
+                        min_wait_ms = wait;
+                }
+
+                // 2. Check pending resize
+                if (pending_resize_w > 0)
+                {
+                    auto elapsed_resize = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_resize_req);
+                    if (elapsed_resize >= resize_delay)
+                    {
+                        current_buffer_.resize(pending_resize_w, pending_resize_h);
+                        previous_buffer_.resize(pending_resize_w, pending_resize_h);
+                        previous_buffer_.clear(); // Force full redraw
+                        term.clearScreen();       // CLear physical screen artifacts
+
+                        pending_resize_w = 0;
+                        needs_render = true;
+                    }
+                    else
+                    {
+                        // Need to wake up soon to finish resize
+                        int wait_r = (int)(resize_delay - elapsed_resize).count();
+                        if (wait_r < 0)
+                            wait_r = 0;
+                        if (wait_r < min_wait_ms)
+                            min_wait_ms = wait_r;
+                    }
+                }
+
                 if (needs_render)
                 {
                     if (root)
@@ -17483,56 +17675,6 @@ namespace cpptui
                     needs_render = false;
                 }
 
-                auto now = std::chrono::steady_clock::now();
-                int min_wait_ms = -1; // Default: wait indefinitely
-
-                // 1. Handle Additional Timers
-                for (auto &t : timers_)
-                {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - t.last_fire);
-                    if (elapsed >= t.interval)
-                    {
-                        if (t.callback)
-                        {
-                            t.callback();
-                            needs_render = true;
-                        }
-                        t.last_fire = now;
-                        elapsed = std::chrono::milliseconds(0);
-                    }
-
-                    int wait = (int)(t.interval - elapsed).count();
-                    if (wait < 0)
-                        wait = 0;
-                    if (min_wait_ms == -1 || wait < min_wait_ms)
-                        min_wait_ms = wait;
-                }
-
-                // Check pending resize
-                if (pending_resize_w > 0)
-                {
-                    auto elapsed_resize = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_resize_req);
-                    if (elapsed_resize >= resize_delay)
-                    {
-                        current_buffer_.resize(pending_resize_w, pending_resize_h);
-                        previous_buffer_.resize(pending_resize_w, pending_resize_h);
-                        previous_buffer_.clear(); // Force full redraw
-                        term.clearScreen();       // CLear physical screen artifacts
-
-                        pending_resize_w = 0;
-                        needs_render = true;
-                    }
-                    else
-                    {
-                        // Need to wake up soon to finish resize
-                        int wait_r = (int)(resize_delay - elapsed_resize).count();
-                        if (wait_r < 0)
-                            wait_r = 0;
-                        if (wait_r < min_wait_ms)
-                            min_wait_ms = wait_r;
-                    }
-                }
-
                 // Wait for event with varying timeout, then batch process up to 50 events
                 int max_batch = 50;
                 int time_left = min_wait_ms;
@@ -17544,6 +17686,13 @@ namespace cpptui
                     if (event.type == EventType::None)
                     {
                         break; // No more events (or timeout)
+                    }
+
+                    // Wakeup event: just trigger a redraw, don't dispatch
+                    if (event.type == EventType::Wakeup)
+                    {
+                        needs_render = true;
+                        break;
                     }
 
                     // Subsequent reads should be instant (check buffer)
@@ -18054,6 +18203,10 @@ namespace cpptui
 
         std::vector<Timer> timers_;
         int next_timer_id_ = 1;
+
+        // Thread-safe callback queue for post()
+        std::mutex post_mutex_;
+        std::vector<std::function<void()>> posted_callbacks_;
 
         std::shared_ptr<Widget> focused_widget_;
 

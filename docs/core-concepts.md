@@ -28,10 +28,39 @@ int main() {
 - **Timers**:
   - `add_timer(interval_ms, callback)`: Schedule a repeating callback. Returns a `TimerId`.
   - `remove_timer(timer_id)`: Stop and remove a timer.
+- **Thread-Safe Updates**:
+  - `update()`: Wake the event loop and trigger a redraw. Thread-safe — can be called from any thread.
+  - `post(callback)`: Schedule a callback to run on the main UI thread, then redraw. Thread-safe — use this to safely modify widgets from background threads without data races.
 - **Dialogs**:
   - `open_dialog(dialog)`: Opens a dialog auto-centered on screen.
   - `open_dialog(dialog, x, y)`: Opens a dialog at specific coordinates.
   - `close_dialog(dialog)`: Closes the specified dialog.
+
+### Threading
+
+Background threads can update the UI without polling. Use `post()` to schedule widget modifications on the main thread:
+
+```cpp
+App app;
+auto label = std::make_shared<Label>("Waiting...");
+
+std::thread worker([&]() {
+    // Do work...
+    app.post([&]() {
+        label->set_text("Done!");  // Runs safely on the UI thread
+    });
+});
+worker.detach();
+
+app.run(root);
+```
+
+For advanced use where you manage your own synchronization, `update()` provides a lighter alternative:
+
+```cpp
+label->set_text("Updated");  // Caller is responsible for thread safety
+app.update();                 // Immediately wakes the event loop to redraw
+```
 
 ### Widget
 

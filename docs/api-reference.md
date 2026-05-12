@@ -9,6 +9,7 @@ nav_order: 4
 <details class="api-toc" open>
 <summary>📑 Table of Contents</summary>
 <ul>
+<li><a href="#app">App</a></li>
 <li><a href="#base-widget-properties">Base Widget Properties</a></li>
 <li class="toc-category">Layouts</li>
 <li><a href="#vertical--horizontal">Vertical / Horizontal</a></li>
@@ -81,6 +82,70 @@ nav_order: 4
 <li><a href="#utf-8-and-wide-character-utilities">UTF-8 Utilities</a></li>
 </ul>
 </details>
+
+---
+
+### App
+{: .api-section-header}
+
+The `App` class is the main application controller. It initializes the terminal, manages the event loop, and provides methods for timers, dialogs, and cross-thread communication.
+
+```cpp
+App app;
+auto root = std::make_shared<Vertical>();
+// ... build UI ...
+app.run(root);
+```
+
+| Method | Description |
+|--------|-------------|
+| `run(root)` | Start the event loop with the given root widget |
+| `quit()` | Exit the event loop and restore the terminal (static) |
+| `register_exit_key(key, ctrl, alt, shift)` | Register a key that will exit the application |
+
+#### Timers
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `add_timer(interval_ms, callback)` | `TimerId` | Schedule a repeating callback at the given interval |
+| `remove_timer(timer_id)` | `void` | Stop and remove a timer |
+
+#### Threading
+
+Thread-safe methods for updating the UI from background threads:
+
+| Method | Description |
+|--------|-------------|
+| `update()` | Wake the event loop and trigger a redraw. Can be called from any thread. |
+| `post(callback)` | Schedule a callback to run on the UI thread, then trigger a redraw. Use this to safely modify widgets from background threads. |
+
+**Using `post()` (recommended):**
+
+```cpp
+// From a background thread — callback runs on the UI thread
+app.post([&]() {
+    label->set_text("Updated safely!");
+    progress->value = 0.75f;
+});
+```
+
+**Using `update()`:**
+
+```cpp
+// For advanced use when you manage your own synchronization
+label->set_text("New value");  // Caller ensures thread safety
+app.update();                  // Wakes the event loop to redraw
+```
+
+#### Dialogs
+
+| Method | Description |
+|--------|-------------|
+| `open_dialog(dialog)` | Open a dialog, auto-centered on screen |
+| `open_dialog(dialog, x, y)` | Open a dialog at specific screen coordinates |
+| `close_dialog(dialog)` | Close a specific dialog |
+
+<p class="back-to-top"><a href="#api-reference">↑ Back to top</a></p>
 
 ---
 
@@ -245,8 +310,9 @@ All container widgets inherit from `Container` and support:
 Wraps a child widget with a border and optional title.
 
 ```cpp
-auto border = std::make_shared<Border>(content);
-border->set_title("Settings", Align::H::Center);
+auto border = std::make_shared<Border>(BorderStyle::Rounded);
+border->set_title("Settings", Alignment::Center);
+border->add(content);
 ```
 
 | Property | Values |
@@ -419,7 +485,8 @@ auto btn = std::make_shared<Button>("Save", []() {
 | Method | Description |
 |--------|-------------|
 | `get_label()` | Returns the button text |
-| `on_click` | Callback set via constructor or manually |
+| `set_label(text)` | Updates the button text |
+| `set_on_click(callback)` | Sets the click callback |
 
 ---
 
