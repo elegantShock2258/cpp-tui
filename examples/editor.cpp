@@ -107,14 +107,14 @@ int main()
 
     // Status Bar
     auto status_bar = std::make_shared<StatusBar>();
-    status_bar->add_section("cpp-tui Editor", 20);
-    status_bar->add_section("UTF-8", 10);
-    status_bar->add_section("Ln 1, Col 1", 15);
+    status_bar->add_section(StyledText().colored_bold("●", Color::Green()).add(" Ready"), 15);
+    status_bar->add_section(StyledText().colored("UTF-8", Color::Cyan()), 10);
+    status_bar->add_section("Ln 1, Col 1", 20, Alignment::Right);
     root->add(status_bar);
 
     text_area->on_cursor_move = [status_bar](int x, int y)
     {
-        status_bar->sections[2].content = "Ln " + std::to_string(y + 1) + ", Col " + std::to_string(x + 1);
+        status_bar->sections[2].styled_content = "Ln " + std::to_string(y + 1) + ", Col " + std::to_string(x + 1);
     };
 
     explorer->on_file_selected = [&](std::string path)
@@ -123,7 +123,7 @@ int main()
         if (f)
         {
             text_area->load_from_stream(f);
-            status_bar->sections[0].content = std::filesystem::path(path).filename().string();
+            status_bar->sections[0].styled_content = StyledText().colored_bold("✏", Color::Yellow()).add(" ").add(std::filesystem::path(path).filename().string());
         }
     };
 

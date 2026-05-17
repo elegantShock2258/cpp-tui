@@ -200,17 +200,7 @@ public:
                 // simplified filter
             }
 
-            std::vector<std::string> row;
-            row.push_back(std::to_string(t.id));
-            row.push_back(t.suite);
-            row.push_back(t.name);
-            row.push_back(s_str);
-
-            std::stringstream ss;
-            ss << std::fixed << std::setprecision(0) << t.duration_ms << "ms";
-            row.push_back(ss.str());
-
-            test_table->rows.push_back(row);
+            test_table->add_row({std::to_string(t.id), t.suite, t.name, s_str, std::to_string((int)t.duration_ms) + "ms"});
         }
     }
 

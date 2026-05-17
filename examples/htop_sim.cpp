@@ -85,7 +85,11 @@ public:
         // Update Top Status
         if (top_status)
         {
-            top_status->sections.clear();
+            if (top_status->sections.empty())
+            {
+                top_status->add_section("", 18);
+                top_status->add_section("", 40);
+            }
 
             int uptime_secs = (int)(time * 10);
             int h = uptime_secs / 3600;
@@ -93,17 +97,17 @@ public:
             int s = uptime_secs % 60;
 
             std::stringstream ss_up;
-            ss_up << " Uptime: " << std::setfill('0') << std::setw(2) << h << ":"
+            ss_up << " " << std::setfill('0') << std::setw(2) << h << ":"
                   << std::setw(2) << m << ":" << std::setw(2) << s;
-            top_status->add_section(ss_up.str());
+            top_status->sections[0].styled_content = StyledText().colored("⏲", Color::Cyan()).add(ss_up.str());
 
             float l1 = 0.5f + 0.2f * std::sin(time * 0.1f) + 0.1f * ((std::rand() % 10) / 10.0f);
             float l5 = l1 * 0.9f + 0.05f * std::cos(time * 0.05f);
             float l15 = l5 * 0.8f + 0.1f;
 
             std::stringstream ss_load;
-            ss_load << " Load average: " << std::fixed << std::setprecision(2) << l1 << " " << l5 << " " << l15;
-            top_status->add_section(ss_load.str());
+            ss_load << " " << std::fixed << std::setprecision(2) << l1 << " " << l5 << " " << l15;
+            top_status->sections[1].styled_content = StyledText().colored("⚡", Color::Yellow()).add(" Load avg:").add(ss_load.str());
         }
 
         // Update List View (Dynamic values)
@@ -352,24 +356,21 @@ int main()
 
     for (const auto &p : processes)
     {
-        std::vector<std::string> row;
-        row.push_back(std::to_string(p.pid));
-        row.push_back(p.user);
-        row.push_back("20");
-        row.push_back("0");
-        row.push_back("106M");
-
         std::stringstream cpu_ss;
         cpu_ss << std::fixed << std::setprecision(1) << p.cpu;
-        row.push_back(cpu_ss.str());
-
         std::stringstream mem_ss;
         mem_ss << std::fixed << std::setprecision(1) << p.mem;
-        row.push_back(mem_ss.str());
 
-        row.push_back(p.cmd);
-
-        list_body->rows.push_back(row);
+        list_body->add_row({
+            std::to_string(p.pid),
+            p.user,
+            "20",
+            "0",
+            "106M",
+            cpu_ss.str(),
+            mem_ss.str(),
+            p.cmd
+        });
     }
     main_layout->add(list_body);
 

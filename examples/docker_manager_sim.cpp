@@ -194,24 +194,22 @@ public:
                     continue;
             }
 
-            std::vector<std::string> row;
-            row.push_back(c.id);
-            row.push_back(c.name);
-            row.push_back(c.image);
-            row.push_back(state_to_str(c.state));
-
             std::stringstream cpu;
             cpu << std::fixed << std::setprecision(2) << c.cpu_usage << "%";
-            row.push_back(cpu.str());
-
+            
             std::stringstream mem;
             mem << std::fixed << std::setprecision(1) << c.mem_usage << "%";
-            row.push_back(mem.str());
 
-            row.push_back(c.ports);
-            row.push_back(c.status_msg);
-
-            container_table->rows.push_back(row);
+            container_table->add_row({
+                c.id, 
+                c.name, 
+                c.image, 
+                state_to_str(c.state), 
+                cpu.str(), 
+                mem.str(), 
+                c.ports, 
+                c.status_msg
+            });
         }
 
         if (stats_label)

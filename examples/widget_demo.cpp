@@ -313,6 +313,32 @@ int main()
         sv->add(btn);
         sv->add(result_label);
 
+        sv->add(std::make_shared<VerticalSpacer>(1));
+
+        // --- Styled Buttons ---
+        auto section_label = std::make_shared<Label>("[ Styled Buttons ]", Theme::current().primary);
+        sv->add(section_label);
+
+        auto styled_btn_row = std::make_shared<Horizontal>();
+        styled_btn_row->fixed_height = 1;
+
+        auto btn_save = std::make_shared<Button>(StyledText().colored("S", Color::Cyan()).add(" Save"));
+        btn_save->fixed_width = 12;
+        styled_btn_row->add(btn_save);
+        styled_btn_row->add(std::make_shared<HorizontalSpacer>(2));
+
+        auto btn_delete = std::make_shared<Button>(StyledText().colored("X", Color::Red()).add(" Delete"));
+        btn_delete->fixed_width = 14;
+        styled_btn_row->add(btn_delete);
+        styled_btn_row->add(std::make_shared<HorizontalSpacer>(2));
+
+        auto btn_play = std::make_shared<Button>(StyledText().colored(">", Color::Green()).add(" Run"));
+        btn_play->fixed_width = 12;
+        btn_play->alignment = Alignment::Center;
+        styled_btn_row->add(btn_play);
+
+        sv->add(styled_btn_row);
+
         inputs_layout->add(box);
     }
     tabs->add_tab("Inputs", inputs_layout);
@@ -611,7 +637,7 @@ int main()
         p3->add(std::make_shared<VerticalSpacer>(1));
         p3->add(std::make_shared<Label>("Your wizard setup is complete."));
         p3->add(std::make_shared<Label>("Click Finish to apply settings."));
-        auto finish_btn = std::make_shared<Button>("Finish", []() {});
+        auto finish_btn = std::make_shared<Button>(StyledText().colored("✔", Color::Green()).add(" Finish"), []() {});
         finish_btn->fixed_width = 14;
         finish_btn->fixed_height = 1;
         finish_btn->bg_color = Theme::current().success;
@@ -1284,10 +1310,11 @@ int main()
         // --- StatusBar Section ---
         new_widgets_layout->add(std::make_shared<Label>("[ StatusBar ]", Theme::current().secondary));
         auto status = std::make_shared<StatusBar>();
-        status->add_section("Ready");
+        status->add_section(StyledText().colored_bold("●", Color::Green()).add(" ").bold("Ready"));
         status->add_section("Ln 42, Col 15");
-        status->add_section("UTF-8");
-        status->add_section("LF");
+        status->add_section(StyledText().colored("UTF-8", Color::Cyan()));
+        status->add_section(StyledText().colored("LF", Color::Yellow()));
+        status->add_section(StyledText().colored_bold("main", Color::Magenta()).italic(" (branch)"));
         status->fixed_height = 1;
         new_widgets_layout->add(status);
     }
@@ -1460,9 +1487,14 @@ int main()
     root->add(tabs);
 
     // Footer
-    auto footer = std::make_shared<Label>("[ / ] Switch tabs  |  Arrow keys navigate  |  Enter/Space select  |  q quit", Color{150, 150, 150});
-    footer->fixed_height = 1;
-    root->add(footer);
+    auto footer_bar = std::make_shared<StatusBar>();
+    footer_bar->separator = "  │  ";
+    footer_bar->add_section(StyledText().colored_bold("[ / ]", Color::Cyan()).add(" Switch tabs"));
+    footer_bar->add_section(StyledText().colored_bold("Arrows", Color::Yellow()).add(" Navigate"));
+    footer_bar->add_section(StyledText().colored_bold("Enter/Space", Color::Green()).add(" Select"));
+    footer_bar->add_section(StyledText().colored_bold("q", Color::Red()).add(" Quit"));
+    footer_bar->bg_color = Color{30, 30, 40};
+    root->add(footer_bar);
 
     // Register Exit Key
     app.register_exit_key('q');

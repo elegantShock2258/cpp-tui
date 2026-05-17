@@ -484,8 +484,8 @@ auto btn = std::make_shared<Button>("Save", []() {
 
 | Method | Description |
 |--------|-------------|
-| `get_label()` | Returns the button text |
-| `set_label(text)` | Updates the button text |
+| `get_label()` | Returns the button text (plain) |
+| `set_label(StyledText)` | Updates the button label (supports mixed formatting) |
 | `set_on_click(callback)` | Sets the click callback |
 
 ---
@@ -496,7 +496,7 @@ Compact inline status indicator.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `text` | `string` | Badge label |
+| `styled_text` | `StyledText` | Badge label with formatting support |
 | `badge_bg` | `Color` | Background color |
 | `text_color` | `Color` | Text color |
 | `style` | enum | `Pill`, `Square`, or `Outline` |
@@ -714,7 +714,8 @@ Input field with autocomplete dropdown.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `suggestions` | `vector<string>` | Suggestion strings |
+| `suggestions` | `vector<StyledText>` | Formatted suggestion strings |
+| `placeholder` | `StyledText` | Formatted placeholder text |
 | `suggestion_limit` | `int` | Max suggestions shown (default 5) |
 | `on_search` | callback | Fired on search submit (`void(string)`) |
 | `on_change` | callback | Fired on text change (`void(string)`) |
@@ -845,9 +846,9 @@ Collapsible selection list.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `options` | `vector<string>` | List of available options |
+| `options` | `vector<StyledText>` | Formatted options |
 | `selected_index` | `int` | Current selection index |
-| `placeholder` | `string` | Text shown when no selection |
+| `placeholder` | `StyledText` | Formatted placeholder |
 | `on_change` | callback | Selection change callback (`void(int, string)`) |
 | `hover_bg` / `hover_fg` | `Color` | Colors when hovered |
 
@@ -906,7 +907,7 @@ table->auto_page_size = true; // fit rows to height
 | Property | Type | Description |
 |----------|------|-------------|
 | `columns` | `vector<string>` | Column headers |
-| `rows` | `vector<vector<string>>` | Row data |
+| `rows` | `vector<vector<StyledText>>` | Row data (supports formatting per cell) |
 | `page_size` | `int` | Number of rows per page |
 | `auto_page_size` | `bool` | Auto-fit rows to container height |
 | `current_page` | `int` | Current page index (0-based) |
@@ -933,7 +934,7 @@ Efficient scrollable list for large datasets (e.g., process lists). Supports row
 | Property | Type | Description |
 |----------|------|-------------|
 | `columns` | `vector<string>` | Column headers |
-| `rows` | `vector<vector<string>>` | Row data |
+| `rows` | `vector<vector<StyledText>>` | Row data (supports formatting per cell) |
 | `col_widths` | `vector<int>` | Optional explicit column widths |
 | `selected_index` | `int` | Currently selected row |
 | `scroll_offset` | `int` | First visible row index |
@@ -1211,7 +1212,7 @@ Formatted keyboard shortcut display. Keys are rendered in inverse colors.
 
 | Method | Description |
 |--------|-------------|
-| `add(key, description)` | Add a shortcut display |
+| `add(key, StyledText description)` | Add a shortcut display with formatting |
 
 ---
 
@@ -1219,13 +1220,19 @@ Formatted keyboard shortcut display. Keys are rendered in inverse colors.
 
 Multi-section footer bar.
 
+```cpp
+auto status = std::make_shared<StatusBar>();
+status->add_section(StyledText().bold("STATUS").colored(" OK", Color::Green()));
+status->add_section("Ln 1, Col 1");
+```
+
 | Property | Type | Description |
 |----------|------|-------------|
 | `separator` | `string` | Section separator string |
 
 | Method | Description |
 |--------|-------------|
-| `add_section(content, width, alignment)` | Add a section |
+| `add_section(StyledText content, int width = 0, Alignment alignment = Alignment::Left)` | Add a formatted section |
 
 ---
 

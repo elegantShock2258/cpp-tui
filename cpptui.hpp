@@ -85,7 +85,7 @@ namespace cpptui
     };
 
     constexpr int VERSION_MAJOR = 1;
-    constexpr int VERSION_MINOR = 4;
+    constexpr int VERSION_MINOR = 5;
     constexpr int VERSION_PATCH = 0;
 
     inline std::string version()
@@ -432,7 +432,22 @@ namespace cpptui
         /// @brief check if selection is active and valid
         bool has_selection() const
         {
-            return start != -1 && end != -1 && start < end;
+            return start != -1 && end != -1 && start != end;
+        }
+
+        /// @brief Get the sorted selection range
+        void get_range(int &s, int &e) const
+        {
+            if (start <= end)
+            {
+                s = start;
+                e = end;
+            }
+            else
+            {
+                s = end;
+                e = start;
+            }
         }
 
         /// @brief check if a specific character index is selected
@@ -443,53 +458,56 @@ namespace cpptui
 
         /// @brief Handle mouse press event
         /// @return true if event handled (selection started)
-        bool handle_mouse_press(const std::vector<CharInfo> &chars, int char_idx)
+        bool handle_mouse_press(const std::vector<CharInfo> &chars, int char_idx, int click_count_from_event = 0)
         {
-            auto now = std::chrono::steady_clock::now();
-            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time).count();
-
-            if (diff < 500 && last_click_idx == char_idx)
+            if (click_count_from_event > 0)
             {
-                click_count++;
-                if (click_count == 2)
-                {
-                    // Double click - Select word
-                    int s = 0, e = 0;
-                    TextHelper::select_word_at(chars, char_idx, s, e);
-                    start = s;
-                    end = e;
-                    drag_start_idx = end; // Anchor for drag extension
-                    mouse_down = true;
-                }
-                else if (click_count == 3)
-                {
-                    // Triple click - Select All
-                    start = 0;
-                    end = (int)chars.size();
-                    drag_start_idx = end;
-                    mouse_down = true;
-                }
-                else
-                {
-                    // Reset to single click behavior if > 3
-                    click_count = 1;
-                    mouse_down = true;
-                    drag_start_idx = char_idx;
-                    start = char_idx;
-                    end = char_idx;
-                }
+                click_count = click_count_from_event;
             }
             else
             {
-                click_count = 1;
+                auto now = std::chrono::steady_clock::now();
+                auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time).count();
+
+                if (diff < 500 && last_click_idx == char_idx)
+                {
+                    click_count++;
+                }
+                else
+                {
+                    click_count = 1;
+                }
+                last_click_time = now;
+                last_click_idx = char_idx;
+            }
+
+            if (click_count == 2)
+            {
+                // Double click - Select word
+                int s = 0, e = 0;
+                TextHelper::select_word_at(chars, char_idx, s, e);
+                start = s;
+                end = e;
+                drag_start_idx = end; // Anchor for drag extension
+                mouse_down = true;
+            }
+            else if (click_count == 3)
+            {
+                // Triple click - Select All (or paragraph if we had line info)
+                start = 0;
+                end = (int)chars.size();
+                drag_start_idx = end;
+                mouse_down = true;
+            }
+            else
+            {
+                // Single click
                 mouse_down = true;
                 drag_start_idx = char_idx;
                 start = char_idx;
                 end = char_idx;
             }
 
-            last_click_time = now;
-            last_click_idx = char_idx;
             return true;
         }
 
@@ -779,6 +797,7 @@ namespace cpptui
         int x = 0;                        ///< X coordinate for Mouse events
         int y = 0;                        ///< Y coordinate for Mouse events
         int button = -1;                  ///< Raw button code for Mouse events
+        int click_count = 0;              ///< Number of clicks (1=single, 2=double, 3=triple)
         std::string paste_text;           ///< Text content for Paste events
 
         // Helpers for standard 1003 mouse tracking encoding
@@ -2472,7 +2491,7 @@ namespace cpptui
         /// @brief Read an event from input
         /// @param timeout_ms Maximum time to wait in milliseconds (-1 for infinite)
         /// @return The read Event (or EventType::None if timeout)
-        Event readEvent(int timeout_ms = -1)
+        Event readRawEvent(int timeout_ms = -1)
         {
             Event event;
             event.type = EventType::None;
@@ -2884,7 +2903,9 @@ namespace cpptui
                 {
                     // Drain the pipe
                     char buf[64];
-                    while (read(g_wakeup_pipe[0], buf, sizeof(buf)) > 0) {}
+                    while (read(g_wakeup_pipe[0], buf, sizeof(buf)) > 0)
+                    {
+                    }
 
                     event.type = EventType::Wakeup;
                     return event;
@@ -2928,6 +2949,58 @@ namespace cpptui
             return event;
         }
 
+        /// @brief Read an event from input with multi-click detection
+        /// @param timeout_ms Maximum time to wait in milliseconds (-1 for infinite)
+        /// @return The read Event (or EventType::None if timeout)
+        Event readEvent(int timeout_ms = -1)
+        {
+            Event event = readRawEvent(timeout_ms);
+
+            // Multi-click detection logic
+            if (event.type == EventType::Mouse)
+            {
+                // We only care about button presses (not releases, motion, or wheel)
+                bool is_press = !event.mouse_release() && !event.mouse_motion() && !event.mouse_wheel();
+
+                if (is_press)
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time_).count();
+
+                    if (elapsed < 500 && event.button == last_click_button_ &&
+                        event.x == last_click_x_ && event.y == last_click_y_)
+                    {
+                        current_click_count_++;
+                        if (current_click_count_ > 3)
+                            current_click_count_ = 1; // Usually 3 is enough (single, double, triple)
+                    }
+                    else
+                    {
+                        current_click_count_ = 1;
+                    }
+
+                    last_click_time_ = now;
+                    last_click_button_ = event.button;
+                    last_click_x_ = event.x;
+                    last_click_y_ = event.y;
+
+                    event.click_count = current_click_count_;
+                }
+                else if (event.mouse_release())
+                {
+                    // Pass current click count to release event too, might be useful
+                    event.click_count = current_click_count_;
+                }
+            }
+            else if (event.type == EventType::Key || event.type == EventType::Resize)
+            {
+                // Reset click count on other major interactions
+                current_click_count_ = 0;
+            }
+
+            return event;
+        }
+
     private:
 #ifdef _WIN32
         DWORD originalOutMode;
@@ -2939,6 +3012,13 @@ namespace cpptui
         struct termios originalTermios;
 #endif
         VTParser parser_;
+
+        // Multi-click tracking
+        std::chrono::steady_clock::time_point last_click_time_;
+        int last_click_button_ = -1;
+        int last_click_x_ = -1;
+        int last_click_y_ = -1;
+        int current_click_count_ = 0;
     };
 
     /// @brief Screen width categories for responsive layouts
@@ -3147,20 +3227,208 @@ namespace cpptui
         bool focused_ = false;
     };
 
+    /// @brief A styled text segment with formatting options
+    struct TextSpan
+    {
+        std::string text;
+        Color color = Color(); ///< Default = inherit from parent
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+
+        TextSpan() = default;
+        TextSpan(const std::string &t) : text(t) {}
+        TextSpan(const std::string &t, Color c) : text(t), color(c) {}
+    };
+
+    /// @brief Builder class for creating styled text with mixed formatting
+    class StyledText
+    {
+    public:
+        StyledText() = default;
+        StyledText(const std::string &text) { add(text); }
+        StyledText(const char *text) { add(std::string(text)); }
+
+        /// Add plain text
+        StyledText &add(const std::string &text)
+        {
+            spans_.push_back(TextSpan(text));
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Add bold text
+        StyledText &bold(const std::string &text)
+        {
+            TextSpan span(text);
+            span.bold = true;
+            spans_.push_back(span);
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Add italic text
+        StyledText &italic(const std::string &text)
+        {
+            TextSpan span(text);
+            span.italic = true;
+            spans_.push_back(span);
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Add underlined text
+        StyledText &underline(const std::string &text)
+        {
+            TextSpan span(text);
+            span.underline = true;
+            spans_.push_back(span);
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Add bold italic text
+        StyledText &bold_italic(const std::string &text)
+        {
+            TextSpan span(text);
+            span.bold = true;
+            span.italic = true;
+            spans_.push_back(span);
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Add colored text
+        StyledText &colored(const std::string &text, Color c)
+        {
+            TextSpan span(text, c);
+            spans_.push_back(span);
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Add colored bold text
+        StyledText &colored_bold(const std::string &text, Color c)
+        {
+            TextSpan span(text, c);
+            span.bold = true;
+            spans_.push_back(span);
+            invalidate_cache();
+            return *this;
+        }
+
+        /// Calculate total character count
+        size_t length() const
+        {
+            size_t len = 0;
+            for (const auto &span : spans_)
+            {
+                len += span.text.length();
+            }
+            return len;
+        }
+
+        /// Get plain text (without formatting)
+        const std::string &plain_text() const
+        {
+            if (plain_text_dirty_)
+            {
+                cached_plain_text_.clear();
+                for (const auto &span : spans_)
+                {
+                    cached_plain_text_ += span.text;
+                }
+                plain_text_dirty_ = false;
+            }
+            return cached_plain_text_;
+        }
+
+        /// Implicit conversion to std::string for backward compatibility
+        operator std::string() const { return plain_text(); }
+
+        /// Get the TextSpan corresponding to a specific UTF-8 character index
+        const TextSpan *get_span_at_char(int char_idx) const
+        {
+            if (spans_.empty())
+                return nullptr;
+
+            ensure_cache();
+
+            // Find the span containing char_idx
+            // Since spans are typically few, linear search is fine, but we use the cached offsets
+            for (size_t i = 0; i < spans_.size(); ++i)
+            {
+                int start = cached_offsets_[i];
+                int end = (i + 1 < spans_.size()) ? cached_offsets_[i + 1] : total_chars_;
+                if (char_idx >= start && char_idx < end)
+                {
+                    return &spans_[i];
+                }
+            }
+            return nullptr;
+        }
+
+        /// Clear all spans
+        void clear()
+        {
+            spans_.clear();
+            invalidate_cache();
+        }
+
+        /// Check if empty
+        bool empty() const { return spans_.empty(); }
+
+        /// Access to spans for manual iteration
+        const std::vector<TextSpan> &spans() const { return spans_; }
+
+    private:
+        std::vector<TextSpan> spans_;
+        mutable std::vector<int> cached_offsets_;
+        mutable std::string cached_plain_text_;
+        mutable int total_chars_ = 0;
+        mutable bool cache_dirty_ = true;
+        mutable bool plain_text_dirty_ = true;
+
+        void invalidate_cache()
+        {
+            cache_dirty_ = true;
+            plain_text_dirty_ = true;
+        }
+
+        void ensure_cache() const
+        {
+            if (!cache_dirty_)
+                return;
+
+            cached_offsets_.clear();
+            int current_idx = 0;
+            for (const auto &span : spans_)
+            {
+                cached_offsets_.push_back(current_idx);
+                current_idx += (int)TextHelper::prepare_text_for_render(span.text).size();
+            }
+            total_chars_ = current_idx;
+            cache_dirty_ = false;
+        }
+    };
+
     /// @brief A simple widget displaying static text
     class Static : public Widget
     {
     public:
-        Static(std::string text) : text_(text)
+        StyledText styled_text_;
+
+        Static(StyledText text) : styled_text_(text), text_(text.plain_text())
         {
             focusable = true;
             tab_stop = false;
         }
 
         /// @brief Update the text content
-        void set_text(const std::string &text)
+        void set_text(const StyledText &text)
         {
-            text_ = text;
+            styled_text_ = text;
+            text_ = text.plain_text();
             clear_selection();
         }
 
@@ -3184,19 +3452,34 @@ namespace cpptui
                     continue;
                 }
 
-                // Simple clipping
                 if (current_x >= x && current_x < x + width &&
                     current_y >= y && current_y < y + height)
                 {
                     Cell cell;
                     cell.content = ci.content;
                     cell.fg_color = fg_color;
-                    cell.bg_color = bg_color;
+
+                    if (bg_color.is_default)
+                        cell.bg_color = buffer.get(current_x, current_y).bg_color;
+                    else
+                        cell.bg_color = bg_color;
 
                     if (is_char_selected(char_idx))
                     {
                         cell.bg_color = Theme::current().selection;
                         cell.fg_color = Color::contrast_color(cell.bg_color);
+                        cell.bold = true;
+                    }
+                    else if (!styled_text_.empty())
+                    {
+                        if (const TextSpan *span = styled_text_.get_span_at_char(char_idx))
+                        {
+                            if (!span->color.is_default)
+                                cell.fg_color = span->color;
+                            cell.bold = span->bold;
+                            cell.italic = span->italic;
+                            cell.underline = span->underline;
+                        }
                     }
 
                     buffer.set(current_x, current_y, cell);
@@ -3216,7 +3499,7 @@ namespace cpptui
 
         void on_blur() override
         {
-            clear_selection();
+            selection_state_.clear();
             Widget::on_blur();
         }
 
@@ -3224,7 +3507,6 @@ namespace cpptui
         {
             if (!selectable)
                 return false;
-
             bool hit = contains(event.x, event.y);
 
             if (event.is_mouse_event())
@@ -3232,47 +3514,20 @@ namespace cpptui
                 if (hit && event.mouse_left() && !event.mouse_motion())
                 {
                     set_focus(true);
-
                     auto chars = prepare_text_for_render(text_);
                     int new_pos = visual_to_char_pos(chars, event.x, event.y);
-
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time_).count();
-
-                    if (elapsed < 500 && new_pos == last_click_pos_)
-                    {
-                        // Double click - select word
-                        TextHelper::select_word_at(chars, new_pos, sel_start_, sel_end_);
-                        is_selecting_ = false; // Don't drag after double click select
-                    }
-                    else
-                    {
-                        if (event.ctrl && sel_start_ >= 0)
-                        {
-                            sel_end_ = new_pos;
-                        }
-                        else
-                        {
-                            sel_start_ = new_pos;
-                            sel_end_ = new_pos;
-                        }
-                        is_selecting_ = true;
-                    }
-                    last_click_time_ = now;
-                    last_click_pos_ = new_pos;
+                    selection_state_.handle_mouse_press(chars, new_pos, event.click_count);
                     return true;
                 }
-
-                if (is_selecting_ && event.mouse_drag())
+                if (selection_state_.mouse_down && event.mouse_drag())
                 {
                     auto chars = prepare_text_for_render(text_);
-                    sel_end_ = visual_to_char_pos(chars, event.x, event.y);
+                    selection_state_.handle_mouse_drag(visual_to_char_pos(chars, event.x, event.y));
                     return true;
                 }
-
                 if (event.mouse_release())
                 {
-                    is_selecting_ = false;
+                    selection_state_.handle_mouse_release();
                 }
                 return false;
             }
@@ -3281,83 +3536,40 @@ namespace cpptui
             {
                 if (event.is_select_all())
                 {
-                    auto chars = prepare_text_for_render(text_);
-                    sel_start_ = 0;
-                    sel_end_ = (int)chars.size();
+                    selection_state_.start = 0;
+                    selection_state_.end = (int)text_.length();
                     return true;
                 }
-
                 if (event.is_copy())
                 {
                     if (has_selection())
-                    {
                         copy_to_clipboard(get_selected_text());
-                    }
                     return true;
                 }
             }
-
             return false;
         }
 
-        bool has_selection() const
-        {
-            return sel_start_ >= 0 && sel_end_ >= 0 && sel_start_ != sel_end_;
-        }
-
-    private:
-        std::string text_;
-        int sel_start_ = -1;
-        int sel_end_ = -1;
-        bool is_selecting_ = false;
-
-        std::chrono::steady_clock::time_point last_click_time_;
-        int last_click_pos_ = -1;
-
-        void clear_selection()
-        {
-            sel_start_ = -1;
-            sel_end_ = -1;
-            is_selecting_ = false;
-        }
-
-        void get_selection_range(int &start, int &end) const
-        {
-            if (sel_start_ <= sel_end_)
-            {
-                start = sel_start_;
-                end = sel_end_;
-            }
-            else
-            {
-                start = sel_end_;
-                end = sel_start_;
-            }
-        }
-
-        bool is_char_selected(int char_idx) const
-        {
-            if (!has_selection())
-                return false;
-            int start, end;
-            get_selection_range(start, end);
-            return char_idx >= start && char_idx < end;
-        }
+        bool has_selection() const { return selection_state_.has_selection(); }
 
         std::string get_selected_text() const
         {
             if (!has_selection())
                 return "";
-            int start, end;
-            get_selection_range(start, end);
+            int s, e;
+            selection_state_.get_range(s, e);
+            return text_.substr(s, e - s);
+        }
 
-            auto chars = prepare_text_for_render(text_);
-            std::string result;
-            for (int i = start; i < end && i < (int)chars.size(); ++i)
-            {
-                result += chars[i].content;
-            }
-            return result;
+        bool is_char_selected(int char_idx) const { return selection_state_.is_selected(char_idx); }
+
+    private:
+        std::string text_;
+        SelectionState selection_state_;
+
+        void clear_selection()
+        {
+            selection_state_.clear();
         }
 
         int visual_to_char_pos(const std::vector<CharInfo> &chars, int vx, int vy) const
@@ -3388,10 +3600,12 @@ namespace cpptui
     class Label : public Widget
     {
     public:
+        StyledText styled_text_;
+
         /// @brief Construct a new Label
         /// @param text The text to display
         /// @param fg Optional foreground color
-        Label(std::string text, Color fg = {0, 0, 0, true}) : text_(text)
+        Label(StyledText text, Color fg = {0, 0, 0, true}) : styled_text_(text), text_(text.plain_text())
         {
             fg_color = fg;
             bg_color = {0, 0, 0, true}; // Transparent
@@ -3401,9 +3615,10 @@ namespace cpptui
         }
 
         /// @brief Set the text content
-        void set_text(const std::string &t)
+        void set_text(const StyledText &t)
         {
-            text_ = t;
+            styled_text_ = t;
+            text_ = t.plain_text();
             clear_selection();
         }
         /// @brief Get the current text content
@@ -3442,214 +3657,114 @@ namespace cpptui
         {
             if (!selectable)
                 return false;
+            bool hit = contains(event.x, event.y);
 
             if (event.is_mouse_event())
             {
-                bool hit = (event.x >= x && event.x < x + width &&
-                            event.y >= y && event.y < y + height);
-
-                // Handle drags outside if we started inside (mouse_down is tracked by selection_state)
+                if (hit && event.mouse_left() && !event.mouse_motion())
+                {
+                    set_focus(true);
+                    auto chars = prepare_text_for_render(text_);
+                    int char_idx = TextHelper::visual_to_char_pos(chars, event.x - x);
+                    selection_state_.handle_mouse_press(chars, char_idx, event.click_count);
+                    return true;
+                }
                 if (selection_state_.mouse_down && event.mouse_drag())
                 {
-                    int rel_x = event.x - x;
-                    auto chars = prepare_text_for_render(text_); // We need chars to map visual pos
-
-                    // Helper to map rel_x to char_idx (logic from original on_event)
-                    int char_idx = 0;
-                    int total_w = 0;
-                    for (auto &c : chars)
-                        total_w += c.display_width;
-
-                    if (rel_x >= total_w)
-                        char_idx = (int)chars.size();
-                    else if (rel_x < 0)
-                        char_idx = 0;
-                    else
-                        char_idx = TextHelper::visual_to_char_pos(chars, rel_x);
-
-                    selection_state_.handle_mouse_drag(char_idx);
+                    auto chars = prepare_text_for_render(text_);
+                    selection_state_.handle_mouse_drag(TextHelper::visual_to_char_pos(chars, event.x - x));
                     return true;
                 }
-
-                if (hit)
-                {
-                    if (event.mouse_left())
-                    {
-                        set_focus(true);
-                        int rel_x = event.x - x;
-                        auto chars = prepare_text_for_render(text_);
-                        int char_idx = TextHelper::visual_to_char_pos(chars, rel_x);
-
-                        selection_state_.handle_mouse_press(chars, char_idx);
-                        return true;
-                    }
-                }
-
                 if (event.mouse_release())
                 {
-                    if (selection_state_.handle_mouse_release())
-                        return true;
+                    selection_state_.handle_mouse_release();
                 }
+                return false;
             }
 
-            // Handle keyboard events for copy
             if (has_focus() && event.is_key_event())
             {
-                // Handle Ctrl+A (Select All)
                 if (event.is_select_all())
                 {
-                    auto chars = prepare_text_for_render(text_);
                     selection_state_.start = 0;
-                    selection_state_.end = (int)chars.size();
-                    selection_state_.mouse_down = false;
+                    selection_state_.end = (int)text_.length();
                     return true;
                 }
-
-                // Handle Copy (Ctrl+Shift+C OR Ctrl+C)
                 if (event.is_copy())
                 {
                     if (has_selection())
-                    {
                         copy_to_clipboard(get_selected_text());
-                    }
                     return true;
                 }
             }
-
             return false;
         }
 
         void render(Buffer &buffer) override
         {
             Color fg = fg_color.resolve(Theme::current().foreground);
-            Color bg = bg_color.resolve(Theme::current().background);
 
-            // Pre-compute UTF-8 characters and their display widths for the text
             std::vector<CharInfo> chars = prepare_text_for_render(text_);
-
-            // Calculate total display width
-            int text_display_width = 0;
-            for (const auto &ci : chars)
-                text_display_width += ci.display_width;
 
             for (int dy = 0; dy < height; ++dy)
             {
-                // For non-text rows, just fill with background
-                if (dy != 0)
-                {
-                    for (int dx = 0; dx < width; ++dx)
-                    {
-                        int sx = x + dx;
-                        int sy = y + dy;
-                        Cell cell;
-                        if (bg_color.is_default)
-                        {
-                            if (sx >= 0 && sx < buffer.width() && sy >= 0 && sy < buffer.height())
-                            {
-                                cell.bg_color = buffer.get(sx, sy).bg_color;
-                            }
-                            else
-                            {
-                                cell.bg_color = Theme::current().background;
-                            }
-                        }
-                        else
-                        {
-                            cell.bg_color = bg_color;
-                        }
-                        cell.fg_color = fg;
-                        cell.content = " ";
-                        buffer.set(sx, sy, cell);
-                    }
-                    continue;
-                }
-
-                // First row - render text with proper UTF-8 rendering
-
-                // Pass 1: Clear the row background
                 for (int dx = 0; dx < width; ++dx)
                 {
-                    Cell cell;
                     int sx = x + dx;
                     int sy = y + dy;
+                    if (sx < 0 || sx >= buffer.width() || sy < 0 || sy >= buffer.height())
+                        continue;
 
-                    if (bg_color.is_default)
-                    {
-                        if (sx >= 0 && sx < buffer.width() && sy >= 0 && sy < buffer.height())
-                        {
-                            cell.bg_color = buffer.get(sx, sy).bg_color;
-                        }
-                        else
-                        {
-                            cell.bg_color = Theme::current().background;
-                        }
-                    }
-                    else
-                    {
-                        cell.bg_color = bg;
-                    }
-
-                    cell.fg_color = fg;
+                    Cell cell;
                     cell.content = " ";
-                    buffer.set(sx, sy, cell);
-                }
+                    cell.fg_color = fg;
+                    if (bg_color.is_default)
+                        cell.bg_color = buffer.get(sx, sy).bg_color;
+                    else
+                        cell.bg_color = bg_color;
 
-                // Pass 2: Render characters
-                int cell_x = 0;
-                for (size_t i = 0; i < chars.size() && cell_x < width; ++i)
-                {
-                    const auto &ci = chars[i];
-
-                    // Determine if this character is selected
-                    bool is_sel = selection_state_.is_selected(i);
-
-                    if (ci.display_width > 0)
+                    if (dy == 0)
                     {
-                        Cell c;
-                        c.content = ci.content;
-                        c.fg_color = fg;
-
-                        // Background handling
-                        if (bg_color.is_default)
+                        int char_idx = TextHelper::visual_to_char_pos(chars, dx);
+                        if (char_idx >= 0 && char_idx < (int)chars.size())
                         {
-                            int sx = x + cell_x;
-                            int sy = y;
-                            if (sx >= 0 && sx < buffer.width() && sy >= 0 && sy < buffer.height())
-                                c.bg_color = buffer.get(sx, sy).bg_color;
+                            // Re-check if this visual position is actually a char start
+                            int cur_vx = 0;
+                            bool is_start = false;
+                            for (int i = 0; i <= char_idx; ++i)
+                            {
+                                if (cur_vx == dx)
+                                {
+                                    is_start = true;
+                                    break;
+                                }
+                                cur_vx += chars[i].display_width;
+                            }
+
+                            if (is_start)
+                            {
+                                cell.content = chars[char_idx].content;
+                                if (selection_state_.is_selected(char_idx))
+                                {
+                                    cell.bg_color = Theme::current().selection;
+                                    cell.fg_color = Color::contrast_color(cell.bg_color);
+                                }
+                                if (chars[char_idx].display_width == 0)
+                                    cell.content = "";
+                            }
                             else
-                                c.bg_color = Theme::current().background;
-                        }
-                        else
-                        {
-                            c.bg_color = bg_color;
-                        }
-
-                        // Apply Selection Style
-                        if (is_sel)
-                        {
-                            c.bg_color = Theme::current().selection;
-                            c.fg_color = Color::contrast_color(c.bg_color);
-                            c.bold = true;
-                        }
-                        else if (underline)
-                        {
-                            c.underline = true;
-                        }
-
-                        buffer.set(x + cell_x, y, c);
-
-                        if (ci.display_width == 2 && cell_x + 1 < width)
-                        {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = c.bg_color;
-                            if (is_sel)
-                                skip.bg_color = c.bg_color;
-
-                            buffer.set(x + cell_x + 1, y, skip);
+                            {
+                                // Handle wide char continuation background
+                                int prev_idx = TextHelper::visual_to_char_pos(chars, dx - 1);
+                                if (prev_idx >= 0 && prev_idx < (int)chars.size() && selection_state_.is_selected(prev_idx))
+                                {
+                                    cell.bg_color = Theme::current().selection;
+                                }
+                                cell.content = "";
+                            }
                         }
                     }
-                    cell_x += ci.display_width;
+                    buffer.set(sx, sy, cell);
                 }
             }
         }
@@ -3659,114 +3774,7 @@ namespace cpptui
         SelectionState selection_state_;
     };
 
-    /// @brief A styled text segment with formatting options
-    struct TextSpan
-    {
-        std::string text;
-        Color color = Color(); ///< Default = inherit from parent
-        bool bold = false;
-        bool italic = false;
-        bool underline = false;
-
-        TextSpan() = default;
-        TextSpan(const std::string &t) : text(t) {}
-        TextSpan(const std::string &t, Color c) : text(t), color(c) {}
-    };
-
-    /// @brief Builder class for creating styled text with mixed formatting
-    class StyledText
-    {
-    public:
-        std::vector<TextSpan> spans;
-
-        /// Add plain text
-        StyledText &add(const std::string &text)
-        {
-            spans.push_back(TextSpan(text));
-            return *this;
-        }
-
-        /// Add bold text
-        StyledText &bold(const std::string &text)
-        {
-            TextSpan span(text);
-            span.bold = true;
-            spans.push_back(span);
-            return *this;
-        }
-
-        /// Add italic text
-        StyledText &italic(const std::string &text)
-        {
-            TextSpan span(text);
-            span.italic = true;
-            spans.push_back(span);
-            return *this;
-        }
-
-        /// Add underlined text
-        StyledText &underline(const std::string &text)
-        {
-            TextSpan span(text);
-            span.underline = true;
-            spans.push_back(span);
-            return *this;
-        }
-
-        /// Add bold italic text
-        StyledText &bold_italic(const std::string &text)
-        {
-            TextSpan span(text);
-            span.bold = true;
-            span.italic = true;
-            spans.push_back(span);
-            return *this;
-        }
-
-        /// Add colored text
-        StyledText &colored(const std::string &text, Color c)
-        {
-            TextSpan span(text, c);
-            spans.push_back(span);
-            return *this;
-        }
-
-        /// Add colored bold text
-        StyledText &colored_bold(const std::string &text, Color c)
-        {
-            TextSpan span(text, c);
-            span.bold = true;
-            spans.push_back(span);
-            return *this;
-        }
-
-        /// Calculate total character count
-        size_t length() const
-        {
-            size_t len = 0;
-            for (const auto &span : spans)
-            {
-                len += span.text.length();
-            }
-            return len;
-        }
-
-        /// Get plain text (without formatting)
-        std::string plain_text() const
-        {
-            std::string result;
-            for (const auto &span : spans)
-            {
-                result += span.text;
-            }
-            return result;
-        }
-
-        /// Clear all spans
-        void clear() { spans.clear(); }
-    };
-
-    /// @brief A multi-line paragraph widget with word wrapping and indentation
+    /// @brief A paragraph widget for displaying multi-line text with optional word-wrapping and indentation
     class Paragraph : public Widget
     {
     public:
@@ -3793,12 +3801,7 @@ namespace cpptui
             focusable = true;
             tab_stop = false;
         }
-        Paragraph(const std::string &t) : text(t)
-        {
-            focusable = true;
-            tab_stop = false;
-        }
-        Paragraph(const StyledText &st) : styled_content(st)
+        Paragraph(StyledText st) : styled_content(st), text(st.plain_text())
         {
             focusable = true;
             tab_stop = false;
@@ -3809,15 +3812,15 @@ namespace cpptui
         {
             text = t;
             styled_content.clear();
-            clear_selection();
+            selection_state_.clear();
         }
 
         /// @brief Set styled text content, clearing any plain text
         void set_styled(const StyledText &st)
         {
             styled_content = st;
-            text.clear();
-            clear_selection();
+            text = st.plain_text();
+            selection_state_.clear();
         }
 
         /// @brief If true, text can be selected and copied
@@ -3825,148 +3828,85 @@ namespace cpptui
 
         void render(Buffer &buffer) override
         {
-            Color fg = fg_color.resolve(Theme::current().foreground);
-            Color bg = bg_color.is_default ? Color() : bg_color;
+            const std::string &plain = text;
 
-            // Determine effective width for text after indentation
-            int effective_width = width;
-
-            // Get the content to render
-            bool has_styled = !styled_content.spans.empty();
-            std::string plain = has_styled ? styled_content.plain_text() : text;
-
-            // Word wrap the text
             std::vector<std::string> lines;
             if (word_wrap)
-            {
-                lines = wrap_text(plain, effective_width);
-            }
+                lines = wrap_text_static(plain, width, first_line_indent, hanging_indent);
             else
             {
-                // Split by newlines only
                 std::istringstream stream(plain);
                 std::string line;
                 while (std::getline(stream, line))
-                {
                     lines.push_back(line);
-                }
             }
 
-            // Build a mapping from plain text position to styled span
-            std::vector<std::pair<int, const TextSpan *>> span_map; // (start_pos, span)
+            bool has_styled = !styled_content.empty();
+            struct SpanPos
+            {
+                int first;
+                const TextSpan *second;
+            };
+            std::vector<SpanPos> span_map;
             if (has_styled)
             {
                 int pos = 0;
-                for (const auto &span : styled_content.spans)
+                for (const auto &span : styled_content.spans())
                 {
                     span_map.push_back({pos, &span});
-                    pos += span.text.length();
+                    pos += (int)span.text.length();
                 }
             }
 
-            // Helper to find span at position
             auto get_span_at = [&](int pos) -> const TextSpan *
             {
                 for (int i = (int)span_map.size() - 1; i >= 0; --i)
                 {
                     if (pos >= span_map[i].first)
-                    {
                         return span_map[i].second;
-                    }
                 }
                 return nullptr;
             };
 
             int char_in_plain_offset = 0;
-
-            // Render each line
             for (int line_idx = 0; line_idx < (int)lines.size() && line_idx < height; ++line_idx)
             {
                 const std::string &line = lines[line_idx];
                 int indent = (line_idx == 0) ? first_line_indent : hanging_indent;
-
-                // Pre-parse UTF-8 characters for this line
-                struct CharInfo
-                {
-                    std::string content;
-                    int display_width;
-                    size_t byte_pos;
-                };
-                std::vector<CharInfo> chars;
-                size_t pos = 0;
-                while (pos < line.size())
-                {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(line, pos, codepoint, byte_len))
-                    {
-                        CharInfo ci;
-                        ci.content = line.substr(pos, byte_len);
-                        ci.display_width = char_display_width(codepoint);
-                        if (ci.display_width < 0)
-                            ci.display_width = 0;
-                        ci.byte_pos = pos;
-                        chars.push_back(ci);
-                        pos += byte_len;
-                    }
-                    else
-                    {
-                        pos++;
-                    }
-                }
-
-                // Calculate total display width
-                int line_display_width = 0;
-                for (const auto &ci : chars)
-                    line_display_width += ci.display_width;
-
-                // Render cells
-                int cell_x = 0;
-                size_t char_idx = 0;
+                auto chars = TextHelper::prepare_text_for_render(line);
 
                 for (int dx = 0; dx < width; ++dx)
                 {
                     int sx = x + dx;
                     int sy = y + line_idx;
+                    if (sx < 0 || sx >= buffer.width() || sy < 0 || sy >= buffer.height())
+                        continue;
 
-                    // Start with default background and clear content
-                    Cell cell;
-                    cell.content = " ";
+                    int cell_x = dx - indent;
 
-                    if (bg_color.is_default)
+                    if (cell_x >= 0 && cell_x < (int)chars.size())
                     {
-                        if (sx >= 0 && sx < buffer.width() && sy >= 0 && sy < buffer.height())
-                        {
-                            cell.bg_color = buffer.get(sx, sy).bg_color;
-                        }
-                        else
-                        {
-                            cell.bg_color = Theme::current().background;
-                        }
-                    }
-                    else
-                    {
-                        cell.bg_color = bg;
-                    }
+                        const auto &ci = chars[cell_x];
+                        int global_char_idx = char_in_plain_offset + cell_x;
 
-                    cell.fg_color = fg;
-                    cell.bold = bold;
-                    cell.italic = italic;
-
-                    int text_x = dx - indent;
-
-                    // Check if we're in text region and have a char to render
-                    if (text_x >= 0 && text_x == cell_x && char_idx < chars.size())
-                    {
-                        const auto &ci = chars[char_idx];
+                        Cell cell;
                         cell.content = ci.content;
+                        cell.fg_color = fg_color;
 
-                        int global_char_idx = char_in_plain_offset + (int)char_idx;
+                        if (bg_color.is_default)
+                            cell.bg_color = buffer.get(sx, sy).bg_color;
+                        else
+                            cell.bg_color = bg_color;
 
-                        if (has_styled)
+                        if (selection_state_.is_selected(global_char_idx))
                         {
-                            const TextSpan *span = get_span_at(global_char_idx);
-                            if (span)
+                            cell.bg_color = Theme::current().selection;
+                            cell.fg_color = Color::contrast_color(cell.bg_color);
+                            cell.bold = true;
+                        }
+                        else if (has_styled)
+                        {
+                            if (const TextSpan *span = get_span_at(global_char_idx))
                             {
                                 if (!span->color.is_default)
                                     cell.fg_color = span->color;
@@ -3976,21 +3916,10 @@ namespace cpptui
                             }
                         }
 
-                        if (is_char_selected(global_char_idx))
-                        {
-                            cell.bg_color = Theme::current().selection;
-                            cell.fg_color = Color::contrast_color(cell.bg_color);
-                        }
-
-                        // Default underline override
                         if (underline)
-                        {
                             cell.underline = true;
-                        }
-
                         buffer.set(sx, sy, cell);
 
-                        // Handle wide character
                         if (ci.display_width == 2 && dx + 1 < width)
                         {
                             dx++;
@@ -3999,29 +3928,24 @@ namespace cpptui
                             skip.bg_color = cell.bg_color;
                             buffer.set(x + dx, sy, skip);
                         }
-                        cell_x += ci.display_width;
-                        char_idx++;
                     }
                     else
                     {
-                        // Not in text or already rendered
-                        cell.underline = false;
-                        buffer.set(sx, sy, cell);
+                        Cell empty;
+                        if (bg_color.is_default)
+                            empty.bg_color = buffer.get(sx, sy).bg_color;
+                        else
+                            empty.bg_color = bg_color;
+                        buffer.set(sx, sy, empty);
                     }
                 }
-                char_in_plain_offset += (int)chars.size();
-                // Add newline offset if not last line and line-wrapping is based on newlines
-                // In Paragraph, wrap_text might have handled newlines.
-                // We need to match how char_idx is calculated across lines.
-                // In wrap_text, we split by newlines, then by words.
-                // The original 'plain' string has newlines.
-                // Let's ensure char_in_plain_offset matches 'plain' indices.
+                char_in_plain_offset += (int)line.length() + 1; // +1 for newline
             }
         }
 
         void on_blur() override
         {
-            clear_selection();
+            selection_state_.clear();
             Widget::on_blur();
         }
 
@@ -4029,7 +3953,6 @@ namespace cpptui
         {
             if (!selectable)
                 return false;
-
             bool hit = contains(event.x, event.y);
 
             if (event.is_mouse_event())
@@ -4037,51 +3960,18 @@ namespace cpptui
                 if (hit && event.mouse_left() && !event.mouse_motion())
                 {
                     set_focus(true);
-
-                    // The original `visual_to_char_idx` handles line wrapping and y-coordinate.
-                    // The provided snippet uses `prepare_text_for_render(text)` and `visual_to_char_pos(chars, event.x)`.
-                    // This implies a change in how character position is determined, potentially simplifying it
-                    // for the purpose of double-click word selection, or assuming a single line context.
-                    // To faithfully apply the change, we'll adapt the existing `visual_to_char_idx` to get `new_pos`.
-                    // The `prepare_text_for_render` and `visual_to_char_pos` functions are not defined in the original
-                    // context, so we'll use the existing `visual_to_char_idx` for `new_pos`.
                     int new_pos = visual_to_char_idx(event.x, event.y);
-
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time_).count();
-
-                    if (elapsed < 500 && new_pos == last_click_pos_)
-                    {
-                        select_word_at(new_pos);
-                        is_selecting_ = false;
-                    }
-                    else
-                    {
-                        if (event.ctrl && sel_start_ >= 0)
-                        {
-                            sel_end_ = new_pos;
-                        }
-                        else
-                        {
-                            sel_start_ = new_pos;
-                            sel_end_ = new_pos;
-                        }
-                        is_selecting_ = true;
-                    }
-                    last_click_time_ = now;
-                    last_click_pos_ = new_pos;
+                    selection_state_.handle_mouse_press(TextHelper::prepare_text_for_render(text), new_pos, event.click_count);
                     return true;
                 }
-
-                if (is_selecting_ && event.mouse_drag())
+                if (selection_state_.mouse_down && event.mouse_drag())
                 {
-                    sel_end_ = visual_to_char_idx(event.x, event.y);
+                    selection_state_.handle_mouse_drag(visual_to_char_idx(event.x, event.y));
                     return true;
                 }
-
                 if (event.mouse_release())
                 {
-                    is_selecting_ = false;
+                    selection_state_.handle_mouse_release();
                 }
                 return false;
             }
@@ -4090,200 +3980,34 @@ namespace cpptui
             {
                 if (event.is_select_all())
                 {
-                    bool has_styled = !styled_content.spans.empty();
-                    std::string plain = has_styled ? styled_content.plain_text() : text;
-                    sel_start_ = 0;
-                    sel_end_ = (int)plain.length();
+                    selection_state_.start = 0;
+                    selection_state_.end = (int)text.length();
                     return true;
                 }
-
                 if (event.is_copy())
                 {
-                    if (has_selection())
-                    {
+                    if (selection_state_.has_selection())
                         copy_to_clipboard(get_selected_text());
-                    }
                     return true;
                 }
             }
-
             return false;
         }
 
-        bool has_selection() const
-        {
-            return sel_start_ >= 0 && sel_end_ >= 0 && sel_start_ != sel_end_;
-        }
-
-    private:
-        /// Word wrap text to fit within given width
-        std::vector<std::string> wrap_text(const std::string &input, int max_width)
-        {
-            std::vector<std::string> result;
-
-            // Handle indentation in width calculation
-            int first_width = max_width - first_line_indent;
-            int other_width = max_width - hanging_indent;
-
-            if (first_width <= 0)
-                first_width = 1;
-            if (other_width <= 0)
-                other_width = 1;
-
-            std::istringstream stream(input);
-            std::string paragraph_line;
-
-            while (std::getline(stream, paragraph_line))
-            {
-                // Process each paragraph (separated by newlines)
-                if (paragraph_line.empty())
-                {
-                    result.push_back("");
-                    continue;
-                }
-
-                // Split into words
-                std::vector<std::string> words;
-                std::istringstream word_stream(paragraph_line);
-                std::string word;
-                while (word_stream >> word)
-                {
-                    words.push_back(word);
-                }
-
-                if (words.empty())
-                {
-                    result.push_back("");
-                    continue;
-                }
-
-                // Build wrapped lines
-                std::string current_line;
-                int current_width = result.empty() ? first_width : other_width;
-
-                for (const auto &w : words)
-                {
-                    if (current_line.empty())
-                    {
-                        current_line = w;
-                    }
-                    else if ((int)(current_line.length() + 1 + w.length()) <= current_width)
-                    {
-                        current_line += " " + w;
-                    }
-                    else
-                    {
-                        result.push_back(current_line);
-                        current_line = w;
-                        current_width = other_width;
-                    }
-                }
-
-                if (!current_line.empty())
-                {
-                    result.push_back(current_line);
-                }
-            }
-
-            return result;
-        }
-
-    private:
-        int sel_start_ = -1;
-        int sel_end_ = -1;
-        bool is_selecting_ = false;
-        std::chrono::steady_clock::time_point last_click_time_;
-        int last_click_pos_ = -1;
-
-        void select_word_at(int pos)
-        {
-            bool has_styled = !styled_content.spans.empty();
-            std::string plain = has_styled ? styled_content.plain_text() : text;
-            auto chars = prepare_text_for_render(plain);
-            if (pos < 0 || pos >= (int)chars.size())
-                return;
-
-            std::vector<uint32_t> codepoints;
-            for (const auto &c : chars)
-            {
-                uint32_t cp;
-                int len;
-                utf8_decode_codepoint(c.content, 0, cp, len);
-                codepoints.push_back(cp);
-            }
-
-            if (!is_word_char(codepoints[pos]))
-            {
-                sel_start_ = pos;
-                sel_end_ = pos + 1;
-                return;
-            }
-
-            int start = pos;
-            while (start > 0 && is_word_char(codepoints[start - 1]))
-                start--;
-            int end = pos;
-            while (end < (int)codepoints.size() && is_word_char(codepoints[end]))
-                end++;
-            sel_start_ = start;
-            sel_end_ = end;
-        }
-
-        void clear_selection()
-        {
-            sel_start_ = -1;
-            sel_end_ = -1;
-            is_selecting_ = false;
-        }
-
-        void get_selection_range(int &start, int &end) const
-        {
-            if (sel_start_ <= sel_end_)
-            {
-                start = sel_start_;
-                end = sel_end_;
-            }
-            else
-            {
-                start = sel_end_;
-                end = sel_start_;
-            }
-        }
-
-        bool is_char_selected(int char_idx) const
-        {
-            if (!has_selection())
-                return false;
-            int start, end;
-            get_selection_range(start, end);
-            return char_idx >= start && char_idx < end;
-        }
+        bool has_selection() const { return selection_state_.has_selection(); }
 
         std::string get_selected_text() const
         {
             if (!has_selection())
                 return "";
-            int start, end;
-            get_selection_range(start, end);
-
-            bool has_styled = !styled_content.spans.empty();
-            std::string plain = has_styled ? styled_content.plain_text() : text;
-
-            if (start < 0)
-                start = 0;
-            if (end > (int)plain.length())
-                end = (int)plain.length();
-            if (start >= end)
-                return "";
-
-            return plain.substr(start, end - start);
+            int s, e;
+            selection_state_.get_range(s, e);
+            return text.substr(s, e - s);
         }
 
         int visual_to_char_idx(int vx, int vy) const
         {
-            bool has_styled = !styled_content.spans.empty();
-            std::string plain = has_styled ? styled_content.plain_text() : text;
-
+            const std::string &plain = text;
             std::vector<std::string> lines;
             if (word_wrap)
                 lines = wrap_text_static(plain, width, first_line_indent, hanging_indent);
@@ -4303,8 +4027,7 @@ namespace cpptui
             for (int i = 0; i < (int)lines.size(); ++i)
             {
                 int indent = (i == 0) ? first_line_indent : hanging_indent;
-                auto chars = prepare_text_for_render(lines[i]);
-
+                auto chars = TextHelper::prepare_text_for_render(lines[i]);
                 if (i == rel_y)
                 {
                     int rel_x = vx - x - indent;
@@ -4317,14 +4040,22 @@ namespace cpptui
                     }
                     return char_offset + (int)chars.size();
                 }
-                char_offset += (int)chars.size();
-                // We need to account for newlines if the wrap was due to original newlines
-                // This is tricky because wrap_text might have merged/split lines.
+                char_offset += (int)lines[i].length() + 1;
             }
             return (int)plain.length();
         }
 
-        // Static version of wrap_text for use in helper methods
+        void select_word_at(int pos)
+        {
+            auto chars = TextHelper::prepare_text_for_render(text);
+            if (pos < 0 || pos >= (int)chars.size())
+                return;
+            int s = 0, e = 0;
+            TextHelper::select_word_at(chars, pos, s, e);
+            selection_state_.start = s;
+            selection_state_.end = e;
+        }
+
         static std::vector<std::string> wrap_text_static(const std::string &input, int max_width, int first_indent, int hang_indent)
         {
             std::vector<std::string> result;
@@ -4349,7 +4080,6 @@ namespace cpptui
                 std::string word;
                 while (word_stream >> word)
                     words.push_back(word);
-
                 if (words.empty())
                 {
                     result.push_back("");
@@ -4376,7 +4106,11 @@ namespace cpptui
             }
             return result;
         }
+
+    private:
+        SelectionState selection_state_;
     };
+
     /// @brief List style for TextList widget
     enum class ListStyle
     {
@@ -4387,15 +4121,16 @@ namespace cpptui
     /// @brief A single item in a TextList with optional nesting
     struct ListItem
     {
+        StyledText styled_text;
         std::string text;   ///< The text content of the item
         int level = 0;      ///< Nesting level (0 = top level, 1 = first indent, etc.)
         int marker_idx = 0; // Used internally for numbering
 
         ListItem() = default;
-        ListItem(const std::string &t, int l = 0) : text(t), level(l) {}
+        ListItem(StyledText t, int l = 0) : styled_text(t), text(t.plain_text()), level(l) {}
 
         // Allow implicit conversion from const char* and string for convenience
-        ListItem(const char *t) : text(t), level(0) {}
+        ListItem(const char *t) : ListItem(StyledText(t), 0) {}
     };
 
     /// @brief A text list widget for displaying bulleted or numbered lists with optional nesting
@@ -4426,9 +4161,21 @@ namespace cpptui
         /// If true, text can be selected and copied
         bool selectable = true;
 
-        TextList() = default;
-        TextList(const std::vector<ListItem> &items_list) : items(items_list) {}
-        TextList(std::initializer_list<ListItem> items_list) : items(items_list) {}
+        TextList()
+        {
+            focusable = true;
+            tab_stop = false;
+        }
+        TextList(const std::vector<ListItem> &items_list) : items(items_list)
+        {
+            focusable = true;
+            tab_stop = false;
+        }
+        TextList(std::initializer_list<ListItem> items_list) : items(items_list)
+        {
+            focusable = true;
+            tab_stop = false;
+        }
 
         /// Add an item to the list at a specific level
         void add_item(const std::string &item, int level = 0)
@@ -4461,57 +4208,207 @@ namespace cpptui
             return get_bullet_marker(level);
         }
 
+        void render(Buffer &buffer) override
+        {
+            int line_offset = 0;
+            int char_in_full_text_offset = 0;
+
+            // Group by numbering if needed
+            std::vector<int> level_counts(10, 0);
+
+            for (size_t i = 0; i < items.size(); ++i)
+            {
+                auto &item = items[i];
+                std::string marker = get_marker(item.level, level_counts[item.level]++);
+
+                // Reset lower level counts if this level is higher (less indented)
+                for (int l = item.level + 1; l < 10; ++l)
+                    level_counts[l] = 0;
+
+                int marker_width = utf8_display_width(marker);
+                int base_indent = item.level * indent_per_level;
+                int text_width = width - base_indent - marker_width;
+
+                std::vector<std::string> lines;
+                if (word_wrap && text_width > 0)
+                    lines = wrap_text(item.text, text_width);
+                else
+                    lines = {item.text};
+
+                // Prepare styled text mapping if needed
+                bool has_styled = !item.styled_text.empty();
+                struct SpanPos
+                {
+                    int first;
+                    const TextSpan *second;
+                };
+                std::vector<SpanPos> span_map;
+                if (has_styled)
+                {
+                    int pos = 0;
+                    for (const auto &span : item.styled_text.spans())
+                    {
+                        span_map.push_back({pos, &span});
+                        pos += (int)span.text.length();
+                    }
+                }
+                auto get_span_at = [&](int pos) -> const TextSpan *
+                {
+                    for (int j = (int)span_map.size() - 1; j >= 0; --j)
+                    {
+                        if (pos >= span_map[j].first)
+                            return span_map[j].second;
+                    }
+                    return nullptr;
+                };
+
+                int item_char_offset = 0;
+                for (int li = 0; li < (int)lines.size(); ++li)
+                {
+                    if (line_offset >= height)
+                        break;
+
+                    int cur_y = y + line_offset;
+                    // FIX: Indentation for the first line must also include the marker width
+                    int cur_indent = base_indent + marker_width + (li == 0 ? 0 : wrap_indent);
+
+                    // Clear line background first
+                    for (int dx = 0; dx < width; ++dx)
+                    {
+                        int sx = x + dx;
+                        if (sx < 0 || sx >= buffer.width() || cur_y < 0 || cur_y >= buffer.height())
+                            continue;
+
+                        Cell c;
+                        c.content = " ";
+                        c.fg_color = fg_color;
+                        if (bg_color.is_default)
+                            c.bg_color = buffer.get(sx, cur_y).bg_color;
+                        else
+                            c.bg_color = bg_color;
+                        buffer.set(sx, cur_y, c);
+                    }
+
+                    // Render marker
+                    if (li == 0)
+                    {
+                        auto marker_chars = TextHelper::prepare_text_for_render(marker);
+                        int m_vx = 0;
+                        for (int mi = 0; mi < (int)marker_chars.size(); ++mi)
+                        {
+                            if (base_indent + m_vx < width)
+                            {
+                                int sx = x + base_indent + m_vx;
+                                if (sx >= 0 && sx < buffer.width() && cur_y >= 0 && cur_y < buffer.height())
+                                {
+                                    Cell c = buffer.get(sx, cur_y);
+                                    c.content = marker_chars[mi].content;
+                                    buffer.set(sx, cur_y, c);
+                                    if (marker_chars[mi].display_width == 2 && base_indent + m_vx + 1 < width)
+                                    {
+                                        buffer.set(sx + 1, cur_y, {"", c.fg_color, c.bg_color});
+                                    }
+                                }
+                            }
+                            m_vx += marker_chars[mi].display_width;
+                        }
+                    }
+
+                    // Render text
+                    auto chars = TextHelper::prepare_text_for_render(lines[li]);
+                    int t_vx = 0;
+                    for (int ci = 0; ci < (int)chars.size(); ++ci)
+                    {
+                        int sx = x + cur_indent + t_vx;
+                        if (sx < x + width && sx < buffer.width() && cur_y >= 0 && cur_y < buffer.height())
+                        {
+                            int global_char_idx = char_in_full_text_offset + item_char_offset + ci;
+                            Cell c = buffer.get(sx, cur_y);
+                            c.content = chars[ci].content;
+
+                            if (selection_state_.is_selected(global_char_idx))
+                            {
+                                c.bg_color = Theme::current().selection;
+                                c.fg_color = Color::contrast_color(c.bg_color);
+                            }
+                            else if (has_styled)
+                            {
+                                if (const TextSpan *span = get_span_at(item_char_offset + ci))
+                                {
+                                    if (!span->color.is_default)
+                                        c.fg_color = span->color;
+                                    c.bold = span->bold;
+                                    c.italic = span->italic;
+                                    c.underline = span->underline;
+                                }
+                            }
+
+                            buffer.set(sx, cur_y, c);
+                            if (chars[ci].display_width == 2 && cur_indent + t_vx + 1 < width)
+                            {
+                                buffer.set(sx + 1, cur_y, {"", c.fg_color, c.bg_color});
+                            }
+                        }
+                        t_vx += chars[ci].display_width;
+                    }
+                    line_offset++;
+                    item_char_offset += (int)lines[li].length() + 1;
+                }
+                char_in_full_text_offset += (int)item.text.length() + 1;
+            }
+
+            // Fill remaining lines
+            for (int lo = line_offset; lo < height; ++lo)
+            {
+                int cur_y = y + lo;
+                if (cur_y < 0 || cur_y >= buffer.height())
+                    continue;
+                for (int dx = 0; dx < width; ++dx)
+                {
+                    int sx = x + dx;
+                    if (sx < 0 || sx >= buffer.width())
+                        continue;
+                    Cell c;
+                    c.content = " ";
+                    c.fg_color = fg_color;
+                    if (bg_color.is_default)
+                        c.bg_color = buffer.get(sx, cur_y).bg_color;
+                    else
+                        c.bg_color = bg_color;
+                    buffer.set(sx, cur_y, c);
+                }
+            }
+        }
+
         bool on_event(const Event &event) override
         {
             if (!selectable)
                 return false;
-
             bool hit = contains(event.x, event.y);
 
             if (event.is_mouse_event())
             {
-                if (is_selecting_ && event.mouse_drag())
+                if (hit && event.mouse_left() && !event.mouse_motion())
                 {
-                    sel_end_ = visual_to_char_idx(event.x, event.y);
-                    return true;
-                }
-
-                if (hit && event.mouse_left())
-                {
-                    focusable = true;
                     set_focus(true);
-
                     int new_pos = visual_to_char_idx(event.x, event.y);
+                    selection_state_.handle_mouse_press(TextHelper::prepare_text_for_render(get_full_text()), new_pos, event.click_count);
 
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time_).count();
-
-                    if (elapsed < 500 && new_pos == last_click_pos_)
+                    // Triple click - Select the entire row (list item)
+                    if (event.click_count == 3)
                     {
-                        select_word_at(new_pos);
-                        is_selecting_ = false;
+                        select_item_at(new_pos);
                     }
-                    else
-                    {
-                        if (event.ctrl && sel_start_ >= 0)
-                        {
-                            sel_end_ = new_pos;
-                        }
-                        else
-                        {
-                            sel_start_ = new_pos;
-                            sel_end_ = new_pos;
-                        }
-                        is_selecting_ = true;
-                    }
-                    last_click_time_ = now;
-                    last_click_pos_ = new_pos;
                     return true;
                 }
-
+                if (selection_state_.mouse_down && event.mouse_drag())
+                {
+                    selection_state_.handle_mouse_drag(visual_to_char_idx(event.x, event.y));
+                    return true;
+                }
                 if (event.mouse_release())
                 {
-                    is_selecting_ = false;
+                    selection_state_.handle_mouse_release();
                 }
                 return false;
             }
@@ -4520,95 +4417,138 @@ namespace cpptui
             {
                 if (event.is_select_all())
                 {
-                    std::string plain = get_full_text();
-                    sel_start_ = 0;
-                    sel_end_ = (int)plain.length();
+                    selection_state_.start = 0;
+                    selection_state_.end = (int)get_full_text().length();
                     return true;
                 }
-
                 if (event.is_copy())
                 {
-                    if (has_selection())
-                    {
+                    if (selection_state_.has_selection())
                         copy_to_clipboard(get_selected_text());
-                    }
                     return true;
                 }
             }
-
             return false;
         }
 
-        bool has_selection() const
+        void on_blur() override
         {
-            return sel_start_ >= 0 && sel_end_ >= 0 && sel_start_ != sel_end_;
+            selection_state_.clear();
+            Widget::on_blur();
+        }
+
+        bool has_selection() const { return selection_state_.has_selection(); }
+
+        std::string get_selected_text() const
+        {
+            if (!has_selection())
+                return "";
+            int s, e;
+            selection_state_.get_range(s, e);
+            std::string plain = get_full_text();
+            return plain.substr(s, e - s);
         }
 
     private:
-        int sel_start_ = -1;
-        int sel_end_ = -1;
-        bool is_selecting_ = false;
-        std::chrono::steady_clock::time_point last_click_time_;
-        int last_click_pos_ = -1;
+        SelectionState selection_state_;
 
-        void clear_selection()
-        {
-            sel_start_ = -1;
-            sel_end_ = -1;
-            is_selecting_ = false;
-        }
-
-        void get_selection_range(int &start, int &end) const
-        {
-            if (sel_start_ <= sel_end_)
-            {
-                start = sel_start_;
-                end = sel_end_;
-            }
-            else
-            {
-                start = sel_end_;
-                end = sel_start_;
-            }
-        }
-
-        bool is_char_selected(int char_idx) const
-        {
-            if (!has_selection())
-                return false;
-            int start, end;
-            get_selection_range(start, end);
-            return char_idx >= start && char_idx < end;
-        }
+        void clear_selection() { selection_state_.clear(); }
 
         std::string get_full_text() const
         {
             std::string result;
             for (size_t i = 0; i < items.size(); ++i)
             {
+                if (i > 0)
+                    result += "\n";
                 result += items[i].text;
-                // Note: Markers are not added here to prevent selection interference
             }
             return result;
         }
 
-        std::string get_selected_text() const
+        int visual_to_char_idx(int vx, int vy) const
         {
-            if (!has_selection())
-                return "";
-            int start, end;
-            get_selection_range(start, end);
-            std::string plain = get_full_text();
-            if (start < 0)
-                start = 0;
-            if (end > (int)plain.length())
-                end = (int)plain.length();
-            if (start >= end)
-                return "";
-            return plain.substr(start, end - start);
+            int line_offset = 0;
+            int char_in_full_text_offset = 0;
+            std::vector<int> level_counts(10, 0);
+
+            for (size_t i = 0; i < items.size(); ++i)
+            {
+                auto &item = items[i];
+                std::string marker = get_marker(item.level, level_counts[item.level]++);
+                for (int l = item.level + 1; l < 10; ++l)
+                    level_counts[l] = 0;
+
+                int marker_width = utf8_display_width(marker);
+                int base_indent = item.level * indent_per_level;
+                int text_width = width - base_indent - marker_width;
+
+                std::vector<std::string> lines;
+                if (word_wrap && text_width > 0)
+                    lines = wrap_text(item.text, text_width);
+                else
+                    lines = {item.text};
+
+                int item_char_offset = 0;
+                for (int li = 0; li < (int)lines.size(); ++li)
+                {
+                    int cur_y = y + line_offset;
+                    if (vy == cur_y)
+                    {
+                        int cur_indent = base_indent + marker_width + (li == 0 ? 0 : wrap_indent);
+                        int rel_x = vx - x - cur_indent;
+                        if (rel_x < 0)
+                            return char_in_full_text_offset + item_char_offset;
+
+                        auto chars = TextHelper::prepare_text_for_render(lines[li]);
+                        int t_vx = 0;
+                        for (int ci = 0; ci < (int)chars.size(); ++ci)
+                        {
+                            if (rel_x < t_vx + chars[ci].display_width / 2)
+                                return char_in_full_text_offset + item_char_offset + ci;
+                            t_vx += chars[ci].display_width;
+                        }
+                        return char_in_full_text_offset + item_char_offset + (int)chars.size();
+                    }
+                    line_offset++;
+                    item_char_offset += (int)lines[li].length() + 1;
+                }
+                char_in_full_text_offset += (int)item.text.length() + 1;
+            }
+            return (int)get_full_text().length();
         }
 
-        // Helper to wrap text for rendering and selection logic
+        void select_word_at(int pos)
+        {
+            std::string full = get_full_text();
+            auto chars = TextHelper::prepare_text_for_render(full);
+            if (pos < 0 || pos >= (int)chars.size())
+                return;
+            int s = 0, e = 0;
+            TextHelper::select_word_at(chars, pos, s, e);
+            selection_state_.start = s;
+            selection_state_.end = e;
+        }
+
+        void select_item_at(int pos)
+        {
+            // Simple: select the whole item that contains 'pos'
+            int char_offset = 0;
+            for (const auto &item : items)
+            {
+                int next_offset = char_offset + (int)item.text.length();
+                if (pos >= char_offset && pos <= next_offset)
+                {
+                    selection_state_.start = char_offset;
+                    selection_state_.end = next_offset;
+                    selection_state_.drag_start_idx = next_offset;
+                    selection_state_.mouse_down = true;
+                    return;
+                }
+                char_offset = next_offset + 1;
+            }
+        }
+
         std::vector<std::string> wrap_text(const std::string &input, int max_width) const
         {
             std::vector<std::string> result;
@@ -4617,22 +4557,20 @@ namespace cpptui
                 result.push_back("");
                 return result;
             }
-
             std::istringstream stream(input);
-            std::string paragraph_line;
-            while (std::getline(stream, paragraph_line))
+            std::string line;
+            while (std::getline(stream, line))
             {
-                if (paragraph_line.empty())
+                if (line.empty())
                 {
                     result.push_back("");
                     continue;
                 }
                 std::vector<std::string> words;
-                std::istringstream word_stream(paragraph_line);
+                std::istringstream word_stream(line);
                 std::string word;
                 while (word_stream >> word)
                     words.push_back(word);
-
                 if (words.empty())
                 {
                     result.push_back("");
@@ -4643,13 +4581,9 @@ namespace cpptui
                 for (const auto &w : words)
                 {
                     if (current_line.empty())
-                    {
                         current_line = w;
-                    }
                     else if ((int)(utf8_display_width(current_line) + 1 + utf8_display_width(w)) <= max_width)
-                    {
                         current_line += " " + w;
-                    }
                     else
                     {
                         result.push_back(current_line);
@@ -4657,395 +4591,9 @@ namespace cpptui
                     }
                 }
                 if (!current_line.empty())
-                {
                     result.push_back(current_line);
-                }
             }
             return result;
-        }
-
-        int visual_to_char_idx(int vx, int vy) const
-        {
-            int current_line_y_offset = 0; // Visual line offset from widget's y
-            int global_char_offset = 0;    // Character offset in the full plain text
-
-            for (size_t i = 0; i < items.size(); ++i)
-            {
-                const auto &item = items[i];
-                std::string marker = get_marker(item.level, item.marker_idx);
-                int level_indent = item.level * indent_per_level;
-                int marker_display_width = utf8_display_width(marker);
-                int total_indent = level_indent + marker_display_width;
-
-                int text_width = width - total_indent - wrap_indent;
-                if (text_width <= 0)
-                    text_width = 1;
-
-                std::vector<std::string> wrapped_lines = wrap_text(item.text, text_width);
-
-                for (size_t line_idx = 0; line_idx < wrapped_lines.size(); ++line_idx)
-                {
-                    if (y + current_line_y_offset == vy) // This is the visual line we clicked on
-                    {
-                        int indent = (line_idx == 0) ? total_indent : (total_indent + wrap_indent);
-                        int rel_x = vx - x - indent; // X coordinate relative to the start of the text content on this line
-
-                        auto chars = prepare_text_for_render(wrapped_lines[line_idx]);
-                        int cur_vx = 0; // Current visual X position within the text content
-                        for (int j = 0; j < (int)chars.size(); ++j)
-                        {
-                            if (rel_x < cur_vx + chars[j].display_width)
-                                return global_char_offset + j;
-                            cur_vx += chars[j].display_width;
-                        }
-                        return global_char_offset + (int)chars.size(); // Clicked past the end of the line
-                    }
-                    global_char_offset += (int)prepare_text_for_render(wrapped_lines[line_idx]).size();
-                    current_line_y_offset++;
-                }
-            }
-            return global_char_offset; // Clicked past the end of all text
-        }
-
-        bool is_word_char(uint32_t codepoint) const
-        {
-            // Simple definition of a word character for selection
-            return std::isalnum(codepoint) || codepoint == '_';
-        }
-
-        void select_word_at(int pos)
-        {
-            std::string plain = get_full_text();
-            auto chars = prepare_text_for_render(plain);
-            if (pos < 0 || pos >= (int)chars.size())
-                return;
-
-            std::vector<uint32_t> codepoints;
-            for (const auto &c : chars)
-            {
-                uint32_t cp;
-                int len;
-                utf8_decode_codepoint(c.content, 0, cp, len);
-                codepoints.push_back(cp);
-            }
-
-            if (!is_word_char(codepoints[pos]))
-            {
-                sel_start_ = pos;
-                sel_end_ = pos + 1;
-                return;
-            }
-
-            int start = pos;
-            while (start > 0 && is_word_char(codepoints[start - 1]))
-                start--;
-            int end = pos;
-            while (end < (int)codepoints.size() && is_word_char(codepoints[end]))
-                end++;
-            sel_start_ = start;
-            sel_end_ = end;
-        }
-
-        void render(Buffer &buffer) override
-        {
-            Color fg = fg_color.resolve(Theme::current().foreground);
-            Color bg = bg_color.is_default ? Color() : bg_color;
-
-            int current_line_y_offset = 0; // Visual line offset from widget's y
-            int global_char_offset = 0;    // Character offset in the full plain text
-
-            // Pre-calculate numbering for numbered lists
-            std::vector<int> level_counts(10, 0); // Max 10 levels for now
-            for (size_t i = 0; i < items.size(); ++i)
-            {
-                ListItem &item = items[i]; // Need non-const to update marker_idx
-                if (style == ListStyle::Numbered)
-                {
-                    // Reset counts for lower levels when a higher level item appears
-                    for (int l = item.level + 1; l < (int)level_counts.size(); ++l)
-                    {
-                        level_counts[l] = 0;
-                    }
-                    item.marker_idx = level_counts[item.level]++;
-                }
-            }
-
-            for (size_t i = 0; i < items.size(); ++i)
-            {
-                const auto &item = items[i];
-                std::string marker = get_marker(item.level, item.marker_idx);
-                int level_indent = item.level * indent_per_level;
-                int marker_display_width = utf8_display_width(marker);
-                int total_indent = level_indent + marker_display_width;
-
-                // Word wrap the item text
-                int text_width = width - total_indent - wrap_indent;
-                if (text_width <= 0)
-                    text_width = 1;
-
-                std::vector<std::string> lines = wrap_text(item.text, text_width);
-
-                for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx)
-                {
-                    if (current_line_y_offset >= height)
-                        break;
-
-                    const std::string &line_text = lines[line_idx];
-                    auto chars = prepare_text_for_render(line_text);
-
-                    for (int dx = 0; dx < width; ++dx)
-                    {
-                        int sx = x + dx;
-                        int sy = y + current_line_y_offset;
-
-                        Cell cell;
-                        cell.content = " ";
-                        if (bg_color.is_default)
-                        {
-                            if (sx >= 0 && sx < buffer.width() && sy >= 0 && sy < buffer.height())
-                                cell.bg_color = buffer.get(sx, sy).bg_color;
-                            else
-                                cell.bg_color = Theme::current().background;
-                        }
-                        else
-                        {
-                            cell.bg_color = bg;
-                        }
-                        cell.fg_color = fg;
-
-                        // First line of item: render indent + marker + text
-                        // Subsequent lines: render indent + marker_width padding + text
-                        if (line_idx == 0)
-                        {
-                            // Level indentation (spaces before marker)
-                            if (dx < level_indent)
-                            {
-                                cell.content = " ";
-                            }
-                            // Render marker
-                            else if (dx < total_indent)
-                            {
-                                int marker_dx = dx - level_indent;
-                                int char_pos = 0;
-                                size_t byte_pos = 0;
-                                while (byte_pos < marker.size())
-                                {
-                                    uint32_t codepoint;
-                                    int byte_len;
-                                    if (utf8_decode_codepoint(marker, byte_pos, codepoint, byte_len))
-                                    {
-                                        int dw = char_display_width(codepoint);
-                                        if (char_pos == marker_dx)
-                                        {
-                                            cell.content = marker.substr(byte_pos, byte_len);
-                                            break;
-                                        }
-                                        else if (dw == 2 && char_pos + 1 == marker_dx)
-                                        {
-                                            cell.content = ""; // Wide char continuation
-                                            break;
-                                        }
-                                        char_pos += (dw > 0 ? dw : 1);
-                                        byte_pos += byte_len;
-                                    }
-                                    else
-                                    {
-                                        byte_pos++;
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                // Render text (after indent + marker)
-                                int text_dx = dx - total_indent;
-                                // Get character at position in line_text
-                                int char_pos = 0;
-                                size_t byte_pos = 0;
-                                while (byte_pos < line_text.size())
-                                {
-                                    uint32_t codepoint;
-                                    int byte_len;
-                                    if (utf8_decode_codepoint(line_text, byte_pos, codepoint, byte_len))
-                                    {
-                                        int dw = char_display_width(codepoint);
-                                        if (char_pos == text_dx)
-                                        {
-                                            cell.content = line_text.substr(byte_pos, byte_len);
-
-                                            // Check selection
-                                            int char_idx_in_line = 0;
-                                            size_t temp_pos = 0;
-                                            while (temp_pos < byte_pos)
-                                            {
-                                                uint32_t cp;
-                                                int len;
-                                                utf8_decode_codepoint(line_text, temp_pos, cp, len);
-                                                char_idx_in_line++;
-                                                temp_pos += len;
-                                            }
-
-                                            if (is_char_selected(global_char_offset + char_idx_in_line))
-                                            {
-                                                cell.bg_color = Theme::current().selection;
-                                            }
-
-                                            break;
-                                        }
-                                        else if (dw == 2 && char_pos + 1 == text_dx)
-                                        {
-                                            cell.content = ""; // Wide char continuation
-
-                                            int char_idx_in_line = 0;
-                                            size_t temp_pos = 0;
-                                            while (temp_pos < byte_pos)
-                                            {
-                                                uint32_t cp;
-                                                int len;
-                                                utf8_decode_codepoint(line_text, temp_pos, cp, len);
-                                                char_idx_in_line++;
-                                                temp_pos += len;
-                                            }
-
-                                            if (is_char_selected(global_char_offset + char_idx_in_line))
-                                            {
-                                                cell.bg_color = Theme::current().selection;
-                                            }
-                                            break;
-                                        }
-                                        char_pos += (dw > 0 ? dw : 1);
-                                        byte_pos += byte_len;
-                                    }
-                                    else
-                                    {
-                                        byte_pos++;
-                                    }
-                                }
-                            }
-                        }
-                        else
-                        {
-                            // Continuation line: indent by total_indent + wrap_indent
-                            int continuation_indent = total_indent + wrap_indent;
-                            int text_dx = dx - continuation_indent;
-                            if (text_dx >= 0)
-                            {
-                                // Get character at position in line_text
-                                int char_pos = 0;
-                                size_t byte_pos = 0;
-                                while (byte_pos < line_text.size())
-                                {
-                                    uint32_t codepoint;
-                                    int byte_len;
-                                    if (utf8_decode_codepoint(line_text, byte_pos, codepoint, byte_len))
-                                    {
-                                        int dw = char_display_width(codepoint);
-                                        if (char_pos == text_dx)
-                                        {
-                                            cell.content = line_text.substr(byte_pos, byte_len);
-
-                                            // Check selection
-                                            int char_idx_in_line = 0;
-                                            size_t temp_pos = 0;
-                                            while (temp_pos < byte_pos)
-                                            {
-                                                uint32_t cp;
-                                                int len;
-                                                utf8_decode_codepoint(line_text, temp_pos, cp, len);
-                                                char_idx_in_line++;
-                                                temp_pos += len;
-                                            }
-
-                                            if (is_char_selected(global_char_offset + char_idx_in_line))
-                                            {
-                                                cell.bg_color = Theme::current().selection;
-                                            }
-
-                                            break;
-                                        }
-                                        else if (dw == 2 && char_pos + 1 == text_dx)
-                                        {
-                                            cell.content = ""; // Wide char continuation
-
-                                            int char_idx_in_line = 0;
-                                            size_t temp_pos = 0;
-                                            while (temp_pos < byte_pos)
-                                            {
-                                                uint32_t cp;
-                                                int len;
-                                                utf8_decode_codepoint(line_text, temp_pos, cp, len);
-                                                char_idx_in_line++;
-                                                temp_pos += len;
-                                            }
-
-                                            if (is_char_selected(global_char_offset + char_idx_in_line))
-                                            {
-                                                cell.bg_color = Theme::current().selection;
-                                            }
-
-                                            break;
-                                        }
-                                        char_pos += (dw > 0 ? dw : 1);
-                                        byte_pos += byte_len;
-                                    }
-                                    else
-                                    {
-                                        byte_pos++;
-                                    }
-                                }
-                            }
-                        }
-
-                        buffer.set(sx, sy, cell);
-                    }
-
-                    current_line_y_offset++;
-
-                    // Increment global_char_offset by the number of characters in this wrapped line
-                    // We need to count chars in this line
-                    int line_chars = 0;
-                    size_t pos = 0;
-                    while (pos < lines[line_idx].size())
-                    {
-                        uint32_t cp;
-                        int len;
-                        utf8_decode_codepoint(lines[line_idx], pos, cp, len);
-                        line_chars++;
-                        pos += len;
-                    }
-                    global_char_offset += line_chars;
-                }
-            }
-
-            // Fill remaining lines with background
-            while (current_line_y_offset < height)
-            {
-                for (int dx = 0; dx < width; ++dx)
-                {
-                    int sx = x + dx;
-                    int sy = y + current_line_y_offset;
-
-                    Cell cell;
-                    cell.content = " ";
-                    if (bg_color.is_default)
-                    {
-                        if (sx >= 0 && sx < buffer.width() && sy >= 0 && sy < buffer.height())
-                        {
-                            cell.bg_color = buffer.get(sx, sy).bg_color;
-                        }
-                        else
-                        {
-                            cell.bg_color = Theme::current().background;
-                        }
-                    }
-                    else
-                    {
-                        cell.bg_color = bg;
-                    }
-                    cell.fg_color = fg;
-                    buffer.set(sx, sy, cell);
-                }
-                current_line_y_offset++;
-            }
         }
     };
 
@@ -5053,20 +4601,28 @@ namespace cpptui
     class Button : public Widget
     {
     public:
-        /// @brief Construct a new Button
+        StyledText styled_label_;
+
         /// @param label The text on the button
         /// @param on_click Callback function to execute on click
-        Button(std::string label, std::function<void()> on_click = {})
-            : label_(label), on_click_(on_click)
+        Button(StyledText label, std::function<void()> on_click = {})
+            : styled_label_(label), label_(label.plain_text()), on_click_(on_click)
         {
             focusable = true;
         }
+
+        std::function<void()> on_double_click;
+        std::function<void()> on_triple_click;
 
         /// @brief Get the button label
         const std::string &get_label() const { return label_; }
 
         /// @brief Set the button label
-        void set_label(const std::string &label) { label_ = label; }
+        void set_label(const StyledText &label)
+        {
+            styled_label_ = label;
+            label_ = label.plain_text();
+        }
 
         /// @brief Set the on_click callback
         void set_on_click(std::function<void()> on_click) { on_click_ = on_click; }
@@ -5081,147 +4637,91 @@ namespace cpptui
 
         void render(Buffer &buffer) override
         {
-            // Pre-compute UTF-8 characters for the label
-            std::vector<CharInfo> chars = prepare_text_for_render(label_);
+            // 1. Resolve visual state
+            Color current_bg = bg_color.resolve(Theme::current().panel_bg);
+            Color current_fg = text_color.is_default ? Color::contrast_color(current_bg) : text_color;
 
+            if (focused_)
+            {
+                Color focus = focus_color.resolve(Theme::current().primary);
+                current_bg = pressed_ ? current_fg : focus;
+                current_fg = pressed_ ? current_bg : Color::contrast_color(focus);
+            }
+            else if (hovered_)
+            {
+                Color hover = hover_color.resolve(Theme::current().hover);
+                current_bg = pressed_ ? current_fg : hover;
+                current_fg = pressed_ ? current_bg : Color::contrast_color(hover);
+            }
+
+            // 2. Fill Background
+            for (int dy = 0; dy < height; ++dy)
+            {
+                for (int dx = 0; dx < width; ++dx)
+                {
+                    Cell c;
+                    c.content = " ";
+                    c.bg_color = current_bg;
+                    c.fg_color = current_fg;
+                    buffer.set(x + dx, y + dy, c);
+                }
+            }
+
+            // 3. Render Text Label
+            std::vector<CharInfo> chars = prepare_text_for_render(label_);
             int label_display_width = 0;
             for (const auto &ci : chars)
                 label_display_width += ci.display_width;
 
-            // Resolve Colors
-            Color bg = bg_color.resolve(Theme::current().panel_bg);
-            // Use contrast_color when text_color is default to ensure readability
-            Color fg = text_color.is_default ? Color::contrast_color(bg) : text_color;
-            Color focus = focus_color.resolve(Theme::current().primary);
-            Color hover = hover_color.resolve(Theme::current().hover);
+            int text_start = 0;
+            if (alignment == Alignment::Center)
+                text_start = std::max(0, (int)(width - label_display_width) / 2);
+            else if (alignment == Alignment::Right)
+                text_start = std::max(0, width - label_display_width - 1);
+            else
+                text_start = 1;
 
-            // Draw button
-            for (int dy = 0; dy < height; ++dy)
+            if (height > 0)
             {
-                // Calculate text start based on alignment
-                int text_start = 0;
-                if (alignment == Alignment::Center)
+                int dy = height / 2;
+                int current_dx = 0;
+                for (size_t i = 0; i < chars.size(); ++i)
                 {
-                    text_start = (width - label_display_width) / 2;
-                }
-                else if (alignment == Alignment::Right)
-                {
-                    text_start = width - label_display_width - 1; // Margin
-                }
-                else
-                {                   // Left
-                    text_start = 1; // Margin
-                }
+                    if (text_start + current_dx >= width)
+                        break;
 
-                int cell_x = 0;
-                size_t char_idx = 0;
+                    const auto &ci = chars[i];
+                    Cell c;
+                    c.content = ci.content;
+                    c.bg_color = current_bg;
+                    c.fg_color = current_fg;
 
-                for (int dx = 0; dx < width; ++dx)
-                {
-                    Cell cell;
-                    cell.content = " ";
-
-                    // Check if we're in the text area on the middle row
-                    if (dy == height / 2 && dx >= text_start && char_idx < chars.size())
+                    // Apply span styles
+                    const TextSpan *span = styled_label_.get_span_at_char((int)i);
+                    if (span)
                     {
-                        int text_offset = dx - text_start;
-                        if (cell_x == text_offset)
-                        {
-                            const auto &ci = chars[char_idx];
-                            if (ci.display_width > 0)
-                            {
-                                cell.content = ci.content;
-
-                                // Handle wide characters
-                                if (ci.display_width == 2 && dx + 1 < width)
-                                {
-                                    // Set colors for current cell
-                                    if (focused_)
-                                    {
-                                        if (pressed_)
-                                        {
-                                            cell.bg_color = fg;
-                                            cell.fg_color = bg;
-                                        }
-                                        else
-                                        {
-                                            cell.bg_color = focus;
-                                            cell.fg_color = Color::contrast_color(focus);
-                                        }
-                                    }
-                                    else if (hovered_)
-                                    {
-                                        if (pressed_)
-                                        {
-                                            cell.bg_color = fg;
-                                            cell.fg_color = bg;
-                                        }
-                                        else
-                                        {
-                                            cell.bg_color = hover;
-                                            cell.fg_color = Color::contrast_color(hover);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        cell.bg_color = bg;
-                                        cell.fg_color = fg;
-                                    }
-                                    buffer.set(x + dx, y + dy, cell);
-
-                                    // Skip next cell
-                                    dx++;
-                                    Cell skip_cell;
-                                    skip_cell.content = "";
-                                    skip_cell.bg_color = cell.bg_color;
-                                    buffer.set(x + dx, y + dy, skip_cell);
-
-                                    cell_x += 2;
-                                    char_idx++;
-                                    continue;
-                                }
-                            }
-                            cell_x += ci.display_width;
-                            char_idx++;
-                        }
+                        c.bold = span->bold;
+                        c.italic = span->italic;
+                        c.underline = span->underline;
+                        if (!span->color.is_default)
+                            c.fg_color = span->color;
                     }
 
-                    if (focused_)
+                    buffer.set(x + text_start + current_dx, y + dy, c);
+
+                    // Handle wide characters by placing an empty skip cell
+                    if (ci.display_width == 2 && text_start + current_dx + 1 < width)
                     {
-                        if (pressed_)
-                        {
-                            cell.bg_color = fg;
-                            cell.fg_color = bg;
-                        }
-                        else
-                        {
-                            cell.bg_color = focus;
-                            cell.fg_color = Color::contrast_color(focus);
-                        }
-                    }
-                    else if (hovered_)
-                    {
-                        if (pressed_)
-                        {
-                            cell.bg_color = fg;
-                            cell.fg_color = bg;
-                        }
-                        else
-                        {
-                            cell.bg_color = hover;
-                            cell.fg_color = Color::contrast_color(hover);
-                        }
-                    }
-                    else
-                    {
-                        cell.bg_color = bg;
-                        cell.fg_color = fg;
+                        Cell skip = c;
+                        skip.content = "";
+                        buffer.set(x + text_start + current_dx + 1, y + dy, skip);
                     }
 
-                    buffer.set(x + dx, y + dy, cell);
+                    current_dx += ci.display_width;
                 }
             }
         }
+
         bool on_event(const Event &event) override
         {
             if (event.is_mouse_event())
@@ -5273,8 +4773,18 @@ namespace cpptui
 
                     if (was_pressed && hit)
                     {
-                        if (on_click_)
+                        if (event.click_count == 2 && on_double_click)
+                        {
+                            on_double_click();
+                        }
+                        else if (event.click_count == 3 && on_triple_click)
+                        {
+                            on_triple_click();
+                        }
+                        else if (on_click_)
+                        {
                             on_click_();
+                        }
                         return true;
                     }
                     if (was_pressed)
@@ -5409,10 +4919,10 @@ namespace cpptui
 
         // Configuration
         std::string placeholder = "";
-        std::string empty_char = " "; // Default filler (space for clean modern look)
-        bool accepts_tab = false;     ///< If true, Tab key inserts spaces instead of moving focus
-        int tab_size = 4;             ///< Number of spaces for Tab key
-        bool is_password = false;     ///< If true, obscure input text
+        std::string empty_char = " ";    // Default filler (space for clean modern look)
+        bool accepts_tab = false;        ///< If true, Tab key inserts spaces instead of moving focus
+        int tab_size = 4;                ///< Number of spaces for Tab key
+        bool is_password = false;        ///< If true, obscure input text
         std::string password_char = "*"; ///< Character used to obscure input text when is_password is true
 
         // Colors
@@ -5483,7 +4993,7 @@ namespace cpptui
             if (is_password && !password_char.empty())
             {
                 int mask_width = TextHelper::utf8_display_width(password_char);
-                for (auto& ci : value_chars)
+                for (auto &ci : value_chars)
                 {
                     ci.content = password_char;
                     ci.display_width = mask_width;
@@ -5652,7 +5162,7 @@ namespace cpptui
                         set_focus(true);
 
                         // Handle press via SelectionState
-                        selection_state_.handle_mouse_press(value_chars, char_pos);
+                        selection_state_.handle_mouse_press(value_chars, char_pos, event.click_count);
 
                         // Sync cursor
                         if (selection_state_.start != selection_state_.end)
@@ -6729,51 +6239,30 @@ namespace cpptui
                     }
                     else
                     {
-                        auto now = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time_).count();
-
-                        if (elapsed < 500 && new_cursor_x == last_click_pos_x_ && new_cursor_y == last_click_pos_y_)
+                        if (event.click_count == 2)
                         {
-                            click_count_++;
-                            if (click_count_ == 2)
-                            {
-                                // Double click - select word
-                                select_word_at_ta(new_cursor_x, new_cursor_y);
-                                is_selecting_ = false; // Selecting word sets selection, but doesn't start drag selection mode necessarily
-                            }
-                            else if (click_count_ == 3)
-                            {
-                                // Triple click - select all
-                                cursor_y_ = (int)lines_.size() - 1;
-                                cursor_x_ = (int)TextHelper::count_codepoints(lines_.back());
-                                sel_anchor_y_ = 0;
-                                sel_anchor_x_ = 0;
-                                is_selecting_ = false;
-                            }
-                            else
-                            {
-                                // Reset
-                                click_count_ = 1;
-                                cursor_x_ = new_cursor_x;
-                                cursor_y_ = new_cursor_y;
-                                sel_anchor_x_ = cursor_x_;
-                                sel_anchor_y_ = cursor_y_;
-                                is_selecting_ = true;
-                            }
+                            // Double click - select word
+                            select_word_at_ta(new_cursor_x, new_cursor_y);
+                            is_selecting_ = false;
+                        }
+                        else if (event.click_count == 3)
+                        {
+                            // Triple click - select all
+                            cursor_y_ = (int)lines_.size() - 1;
+                            cursor_x_ = (int)TextHelper::count_codepoints(lines_.back());
+                            sel_anchor_y_ = 0;
+                            sel_anchor_x_ = 0;
+                            is_selecting_ = false;
                         }
                         else
                         {
                             // Start new selection
-                            click_count_ = 1;
                             cursor_x_ = new_cursor_x;
                             cursor_y_ = new_cursor_y;
                             sel_anchor_x_ = cursor_x_;
                             sel_anchor_y_ = cursor_y_;
                             is_selecting_ = true;
                         }
-                        last_click_time_ = now;
-                        last_click_pos_x_ = new_cursor_x;
-                        last_click_pos_y_ = new_cursor_y;
                     }
                     ensure_cursor_visible();
                     return true;
@@ -9066,6 +8555,7 @@ namespace cpptui
     public:
         // Style: [ OFF ] / [ ON ] or ( ) / (*) with color
         bool is_on = false;
+        StyledText styled_label;
         std::string label;
         std::function<void(bool)> on_change;
 
@@ -9075,11 +8565,11 @@ namespace cpptui
         std::string on_label = "[ ON  ]";
         std::string off_label = "[ OFF ]";
 
-        ToggleSwitch(std::string label, bool initial = false)
-            : label(label), is_on(initial)
+        ToggleSwitch(StyledText label, bool initial = false)
+            : styled_label(label), label(label.plain_text()), is_on(initial)
         {
             focusable = true;
-            width = label.length() + 8; // "[ OFF ] " + label
+            width = utf8_display_width(this->label) + 8; // "[ OFF ] " + label
             height = 1;
             fixed_height = 1;
         }
@@ -9137,6 +8627,7 @@ namespace cpptui
                 }
             }
 
+            int state_chars = (int)TextHelper::prepare_text_for_render(state_str + " ").size();
             int cell_x = 0;
             for (size_t i = 0; i < chars.size() && cell_x < width; ++i)
             {
@@ -9152,6 +8643,18 @@ namespace cpptui
                 else
                 {
                     c.fg_color = fg;
+                    // Apply styling to the label part
+                    if ((int)i >= state_chars && !styled_label.empty())
+                    {
+                        if (const TextSpan *span = styled_label.get_span_at_char((int)i - state_chars))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
                 }
 
                 buffer.set(x + cell_x, y, c);
@@ -9205,9 +8708,10 @@ namespace cpptui
     public:
         // Layout mode
         bool horizontal = false;
-        std::vector<std::string> options;
+        std::vector<StyledText> options;
         int selected_index = 0;
         std::function<void(int)> on_change;
+        std::function<void(int)> on_submit; ///< Triggered on double click or Enter
 
         int focused_option_idx = 0;
         int hovered_index = -1; // New Hover State
@@ -9220,7 +8724,7 @@ namespace cpptui
 
         RadioSet() { focusable = true; }
 
-        void set_options(const std::vector<std::string> &opts)
+        void set_options(const std::vector<StyledText> &opts)
         {
             options = opts;
             recalculate_size();
@@ -9251,7 +8755,6 @@ namespace cpptui
                 bool is_sel = ((int)i == selected_index);
 
                 std::string prefix = is_sel ? selected_prefix : unselected_prefix;
-                std::string text = prefix + options[i];
 
                 Color current_fg = fg;
                 Color current_bg = bg;
@@ -9267,41 +8770,57 @@ namespace cpptui
                 if (!is_sel && !unselected_color.is_default)
                     current_fg = unselected_color;
 
-                // UTF-8 safe rendering with proper display width
-                size_t pos = 0;
+                // Render prefix
+                auto prefix_chars = TextHelper::prepare_text_for_render(prefix);
                 int cell_x = 0;
-                while (pos < text.size())
+                for (const auto &ci : prefix_chars)
                 {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(text, pos, codepoint, byte_len))
+                    Cell cell;
+                    cell.content = ci.content;
+                    cell.fg_color = current_fg;
+                    cell.bg_color = current_bg;
+                    if (!is_sel && (int)i == hovered_index)
+                        cell.bg_color = Theme::current().hover;
+                    buffer.set(draw_x + cell_x, draw_y, cell);
+                    cell_x += ci.display_width;
+                }
+
+                // Render option label
+                auto label_chars = TextHelper::prepare_text_for_render(options[i].plain_text());
+                for (size_t j = 0; j < label_chars.size(); ++j)
+                {
+                    const auto &ci = label_chars[j];
+                    Cell cell;
+                    cell.content = ci.content;
+                    cell.fg_color = current_fg;
+                    cell.bg_color = current_bg;
+
+                    // Apply styling
+                    if (!options[i].empty())
                     {
-                        Cell cell;
-                        cell.content = text.substr(pos, byte_len);
-                        cell.fg_color = current_fg;
-                        cell.bg_color = current_bg;
-
-                        if (!is_sel && (int)i == hovered_index)
-                            cell.bg_color = Theme::current().hover;
-
-                        buffer.set(draw_x + cell_x, draw_y, cell);
-
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2)
+                        if (const TextSpan *span = options[i].get_span_at_char((int)j))
                         {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = cell.bg_color;
-                            buffer.set(draw_x + cell_x + 1, draw_y, skip);
+                            if (!span->color.is_default)
+                                cell.fg_color = span->color;
+                            cell.bold = span->bold;
+                            cell.italic = span->italic;
+                            cell.underline = span->underline;
                         }
-                        cell_x += (dw > 0 ? dw : 1);
-                        pos += byte_len;
-                    }
-                    else
-                    {
-                        pos++;
                     }
 
+                    if (!is_sel && (int)i == hovered_index)
+                        cell.bg_color = Theme::current().hover;
+
+                    buffer.set(draw_x + cell_x, draw_y, cell);
+
+                    if (ci.display_width == 2)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = cell.bg_color;
+                        buffer.set(draw_x + cell_x + 1, draw_y, skip);
+                    }
+                    cell_x += ci.display_width;
                     if (horizontal && cell_x >= width)
                         break;
                 }
@@ -9322,12 +8841,13 @@ namespace cpptui
 
         void recalculate_size()
         {
+            int pref_w = utf8_display_width(selected_prefix); // Assume both same width
             if (horizontal)
             {
                 height = 1;
                 width = 0;
                 for (const auto &s : options)
-                    width += s.length() + 4 + 2;
+                    width += utf8_display_width(s.plain_text()) + pref_w + 2;
             }
             else
             {
@@ -9335,7 +8855,7 @@ namespace cpptui
                 height = options.size();
                 for (const auto &s : options)
                 {
-                    int w = s.length() + 4;
+                    int w = utf8_display_width(s.plain_text()) + pref_w;
                     if (w > width)
                         width = w;
                 }
@@ -9357,11 +8877,13 @@ namespace cpptui
                         int cx = x;
                         for (size_t i = 0; i < options.size(); ++i)
                         {
-                            int w = options[i].length() + 6; // Approx
+                            int w = utf8_display_width(options[i].plain_text()) + utf8_display_width(selected_prefix) + 2;
                             if (event.x >= cx && event.x < cx + w)
                             {
                                 select(i);
                                 set_focus(true);
+                                if (event.click_count >= 2 && on_submit)
+                                    on_submit(i);
                                 return true;
                             }
                             cx += w;
@@ -9374,6 +8896,8 @@ namespace cpptui
                         {
                             select(row);
                             set_focus(true);
+                            if (event.click_count >= 2 && on_submit)
+                                on_submit(row);
                             return true;
                         }
                     }
@@ -9388,7 +8912,7 @@ namespace cpptui
                         int cx = x;
                         for (size_t i = 0; i < options.size(); ++i)
                         {
-                            int w = options[i].length() + 6;
+                            int w = utf8_display_width(options[i].plain_text()) + utf8_display_width(selected_prefix) + 2;
                             if (event.x >= cx && event.x < cx + w)
                             {
                                 if (hovered_index != (int)i)
@@ -9446,6 +8970,12 @@ namespace cpptui
                     select(new_idx);
                     return true;
                 }
+                if (event.is_enter())
+                {
+                    if (on_submit)
+                        on_submit(selected_index);
+                    return true;
+                }
             }
             return false;
         }
@@ -9479,9 +9009,10 @@ namespace cpptui
     class CheckboxList : public Widget
     {
     public:
-        std::vector<std::string> options;
+        std::vector<StyledText> options;
         std::vector<bool> checked_states; // Parallel array
         std::function<void(int, bool)> on_change;
+        std::function<void(int)> on_submit; ///< Triggered on double click or Enter
 
         int hovered_index = -1;
         int cursor_index = 0;
@@ -9495,7 +9026,7 @@ namespace cpptui
 
         CheckboxList() { focusable = true; }
 
-        void set_options(const std::vector<std::string> &opts)
+        void set_options(const std::vector<StyledText> &opts)
         {
             options = opts;
             checked_states.assign(opts.size(), false);
@@ -9507,9 +9038,10 @@ namespace cpptui
         {
             height = options.size();
             width = 0;
+            int pref_w = utf8_display_width(unchecked_prefix);
             for (const auto &s : options)
             {
-                int w = s.length() + checked_prefix.length();
+                int w = utf8_display_width(s.plain_text()) + pref_w;
                 if (w > width)
                     width = w;
             }
@@ -9536,49 +9068,72 @@ namespace cpptui
                 bool is_cursor = (has_focus() && (int)i == cursor_index);
 
                 std::string prefix = is_checked ? checked_prefix : unchecked_prefix;
-                std::string text = prefix + options[i];
 
                 Color line_fg = fg;
                 if (is_checked)
                     line_fg = checked_color.resolve(Theme::current().success);
 
-                // UTF-8 safe rendering
-                size_t pos = 0;
+                // Render prefix
+                auto prefix_chars = TextHelper::prepare_text_for_render(prefix);
                 int cell_x = 0;
-                while (pos < text.size())
+                for (const auto &ci : prefix_chars)
                 {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(text, pos, codepoint, byte_len))
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = line_fg;
+                    c.bg_color = bg;
+                    if (is_cursor)
                     {
-                        Cell c;
-                        c.content = text.substr(pos, byte_len);
-                        c.fg_color = line_fg;
-                        c.bg_color = bg;
-                        if (is_cursor)
-                        {
-                            c.bg_color = Theme::current().primary;
-                            c.fg_color = Theme::current().background;
-                        }
-                        else if ((int)i == hovered_index)
-                            c.bg_color = Theme::current().hover;
-                        buffer.set(draw_x + cell_x, draw_y, c);
+                        c.bg_color = Theme::current().primary;
+                        c.fg_color = Theme::current().background;
+                    }
+                    else if ((int)i == hovered_index)
+                        c.bg_color = Theme::current().hover;
+                    buffer.set(draw_x + cell_x, draw_y, c);
+                    cell_x += ci.display_width;
+                }
 
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2)
-                        {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = c.bg_color;
-                            buffer.set(draw_x + cell_x + 1, draw_y, skip);
-                        }
-                        cell_x += (dw > 0 ? dw : 1);
-                        pos += byte_len;
-                    }
-                    else
+                // Render option label
+                auto label_chars = TextHelper::prepare_text_for_render(options[i].plain_text());
+                for (size_t j = 0; j < label_chars.size(); ++j)
+                {
+                    const auto &ci = label_chars[j];
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = line_fg;
+                    c.bg_color = bg;
+
+                    // Apply styling
+                    if (!options[i].empty())
                     {
-                        pos++;
+                        if (const TextSpan *span = options[i].get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
                     }
+
+                    if (is_cursor)
+                    {
+                        c.bg_color = Theme::current().primary;
+                        c.fg_color = Theme::current().background;
+                    }
+                    else if ((int)i == hovered_index)
+                        c.bg_color = Theme::current().hover;
+
+                    buffer.set(draw_x + cell_x, draw_y, c);
+
+                    if (ci.display_width == 2)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = c.bg_color;
+                        buffer.set(draw_x + cell_x + 1, draw_y, skip);
+                    }
+                    cell_x += ci.display_width;
                 }
                 draw_y++;
             }
@@ -9607,6 +9162,8 @@ namespace cpptui
                             toggle(row);
                             cursor_index = row;
                             set_focus(true);
+                            if (event.click_count >= 2 && on_submit)
+                                on_submit(row);
                             return true;
                         }
                     }
@@ -9643,6 +9200,8 @@ namespace cpptui
                 if (event.is_activate())
                 {
                     toggle(cursor_index);
+                    if (on_submit)
+                        on_submit(cursor_index);
                     return true;
                 }
             }
@@ -9664,10 +9223,10 @@ namespace cpptui
     class Dropdown : public Widget
     {
     public:
-        std::vector<std::string> options;
+        std::vector<StyledText> options;
         int selected_index = -1;
         bool is_open = false;
-        std::string placeholder = "Select...";
+        StyledText placeholder = "Select...";
 
         std::function<void(int, std::string)> on_change;
 
@@ -9692,7 +9251,7 @@ namespace cpptui
             fixed_height = 1; // Start closed
         }
 
-        void set_options(const std::vector<std::string> &opts)
+        void set_options(const std::vector<StyledText> &opts)
         {
             options = opts;
             if (selected_index >= (int)options.size())
@@ -9728,22 +9287,24 @@ namespace cpptui
                 fg = hover_fg.resolve(Theme::current().input_fg);
             }
 
-            std::string text = placeholder;
+            StyledText styled_text = placeholder;
             if (selected_index >= 0 && selected_index < (int)options.size())
             {
-                text = options[selected_index];
+                styled_text = options[selected_index];
             }
+            std::string text = styled_text.plain_text();
 
             // Draw Header Box
-            std::string arrow = is_open ? "\u25B2" : "\u25BC"; // Up/Down
+            std::string arrow = is_open ? "^" : "v";
 
             int avail_w = width - 2; // margins
             if (avail_w < 0)
                 avail_w = 0;
 
-            if ((int)text.length() > avail_w - 2)
+            int text_w = utf8_display_width(text);
+            if (text_w > avail_w - 2)
             {
-                text = text.substr(0, avail_w - 2) + "..";
+                text = TextHelper::utf8_substr(text, 0, avail_w - 2) + "..";
             }
 
             for (int i = 0; i < width; ++i)
@@ -9754,13 +9315,40 @@ namespace cpptui
                 buffer.set(x + i, y, c);
             }
 
-            for (int i = 0; i < (int)text.length(); ++i)
+            auto text_chars = TextHelper::prepare_text_for_render(text);
+            int current_dx = 0;
+            for (size_t i = 0; i < text_chars.size(); ++i)
             {
+                if (current_dx >= avail_w - 2)
+                    break;
+                const auto &ci = text_chars[i];
                 Cell c;
-                c.content = std::string(1, text[i]);
+                c.content = ci.content;
                 c.bg_color = bg;
                 c.fg_color = fg;
-                buffer.set(x + 1 + i, y, c);
+
+                // Apply styling
+                if (!styled_text.empty())
+                {
+                    if (const TextSpan *span = styled_text.get_span_at_char((int)i))
+                    {
+                        if (!span->color.is_default)
+                            c.fg_color = span->color;
+                        c.bold = span->bold;
+                        c.italic = span->italic;
+                        c.underline = span->underline;
+                    }
+                }
+
+                buffer.set(x + 1 + current_dx, y, c);
+                if (ci.display_width == 2 && current_dx + 1 < avail_w - 2)
+                {
+                    Cell skip;
+                    skip.content = "";
+                    skip.bg_color = bg;
+                    buffer.set(x + 1 + current_dx + 1, y, skip);
+                }
+                current_dx += ci.display_width;
             }
 
             Cell c_arr;
@@ -10333,6 +9921,11 @@ namespace cpptui
                 } else {
                      if (on_submit) on_submit(ptr);
                 } });
+            btn->on_double_click = [this, ptr]()
+            {
+                if (on_submit)
+                    on_submit(ptr);
+            };
             btn->fixed_height = 1;
             btn->bg_color = bg;
             btn->text_color = fg;
@@ -10544,7 +10137,7 @@ namespace cpptui
                     else if (event.mouse_left()) // Press
                     {
                         set_focus(true); // Take focus for Copy
-                        if (selection_state_.handle_mouse_press(chars, char_idx))
+                        if (selection_state_.handle_mouse_press(chars, char_idx, event.click_count))
                             return true;
                     }
                 }
@@ -10584,6 +10177,12 @@ namespace cpptui
             }
 
             return Container::on_event(event);
+        }
+
+        void on_blur() override
+        {
+            selection_state_.clear();
+            Container::on_blur();
         }
 
         void render(Buffer &buffer) override
@@ -10973,9 +10572,13 @@ namespace cpptui
 
     struct MenuItem
     {
+        StyledText styled_label;
         std::string label;
         std::function<void()> action;
         std::vector<MenuItem> sub_items;
+
+        MenuItem(StyledText l = "", std::function<void()> a = {}, std::vector<MenuItem> s = {})
+            : styled_label(l), label(l.plain_text()), action(a), sub_items(s) {}
     };
 
     /// @brief A general purpose popup dialog
@@ -11174,13 +10777,13 @@ namespace cpptui
             int max_len = 0;
             for (const auto &item : items)
             {
-                int len = item.label.length() + selection_indicator.length();
+                int len = utf8_display_width(item.label) + utf8_display_width(selection_indicator);
                 if (len > max_len)
                     max_len = len;
             }
 
             // Allow for Title size as well
-            int title_len = (int)get_title().length();
+            int title_len = utf8_display_width(get_title());
             if (title_len > max_len)
                 max_len = title_len;
 
@@ -11224,54 +10827,76 @@ namespace cpptui
 
                 bool is_sel = (i == (size_t)selected_index);
 
-                std::string prefix = is_sel ? selection_indicator : std::string(selection_indicator.length(), ' ');
-                std::string text = prefix + items[i].label;
-
+                std::string prefix = is_sel ? selection_indicator : std::string(utf8_display_width(selection_indicator), ' ');
+                int prefix_width = utf8_display_width(prefix);
                 int content_width = width - 4;
-                if ((int)text.length() < content_width)
-                {
-                    text += std::string(content_width - text.length(), ' ');
-                }
 
                 Color n_fg = normal_fg.resolve(Theme::current().foreground);
                 Color n_bg = normal_bg.resolve(Theme::current().panel_bg);
-
                 Color h_fg = highlight_fg.resolve(Theme::current().input_fg);
                 Color h_bg = highlight_bg.resolve(Theme::current().selection);
 
                 Color fg = is_sel ? h_fg : n_fg;
                 Color bg = is_sel ? h_bg : n_bg;
 
-                // UTF-8 safe rendering
-                size_t pos = 0;
-                int cell_x = 0;
-                while (pos < text.size() && cell_x < content_width)
+                // Fill background
+                for (int dx = 0; dx < content_width; ++dx)
                 {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(text, pos, codepoint, byte_len))
-                    {
-                        Cell c;
-                        c.content = text.substr(pos, byte_len);
-                        c.fg_color = fg;
-                        c.bg_color = bg;
-                        buffer.set(item_x + cell_x, item_y, c);
+                    Cell c;
+                    c.content = " ";
+                    c.bg_color = bg;
+                    buffer.set(item_x + dx, item_y, c);
+                }
 
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2 && cell_x + 1 < content_width)
-                        {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = bg;
-                            buffer.set(item_x + cell_x + 1, item_y, skip);
-                        }
-                        cell_x += (dw > 0 ? dw : 1);
-                        pos += byte_len;
-                    }
-                    else
+                // Render prefix
+                auto prefix_chars = TextHelper::prepare_text_for_render(prefix);
+                int current_dx = 0;
+                for (const auto &ci : prefix_chars)
+                {
+                    if (current_dx >= content_width)
+                        break;
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = fg;
+                    c.bg_color = bg;
+                    buffer.set(item_x + current_dx, item_y, c);
+                    current_dx += ci.display_width;
+                }
+
+                // Render label
+                auto label_chars = TextHelper::prepare_text_for_render(items[i].label);
+                for (size_t j = 0; j < label_chars.size(); ++j)
+                {
+                    if (current_dx >= content_width)
+                        break;
+                    const auto &ci = label_chars[j];
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = fg;
+                    c.bg_color = bg;
+
+                    // Apply styling
+                    if (!items[i].styled_label.empty())
                     {
-                        pos++;
+                        if (const TextSpan *span = items[i].styled_label.get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
                     }
+
+                    buffer.set(item_x + current_dx, item_y, c);
+                    if (ci.display_width == 2 && current_dx + 1 < content_width)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = bg;
+                        buffer.set(item_x + current_dx + 1, item_y, skip);
+                    }
+                    current_dx += ci.display_width;
                 }
             }
         }
@@ -11321,17 +10946,58 @@ namespace cpptui
             int current_x = x + 1;
             for (size_t i = 0; i < items.size(); ++i)
             {
-                std::string label = " " + items[i].label + " ";
-
                 Color c_bg = (i == (size_t)selected_index) ? h_bg : bg;
                 Color c_fg = (i == (size_t)selected_index) ? h_fg : fg;
 
-                for (char ch : label)
+                // Render with padding
+                if (current_x < x + width)
+                {
+                    Cell c;
+                    c.content = " ";
+                    c.bg_color = c_bg;
+                    c.fg_color = c_fg;
+                    buffer.set(current_x++, y, c);
+                }
+
+                auto label_chars = TextHelper::prepare_text_for_render(items[i].label);
+                for (size_t j = 0; j < label_chars.size(); ++j)
                 {
                     if (current_x >= x + width)
                         break;
+                    const auto &ci = label_chars[j];
                     Cell c;
-                    c.content = std::string(1, ch);
+                    c.content = ci.content;
+                    c.fg_color = c_fg;
+                    c.bg_color = c_bg;
+
+                    // Apply styling
+                    if (!items[i].styled_label.empty())
+                    {
+                        if (const TextSpan *span = items[i].styled_label.get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
+                    buffer.set(current_x, y, c);
+                    if (ci.display_width == 2 && current_x + 1 < x + width)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = c_bg;
+                        buffer.set(current_x + 1, y, skip);
+                    }
+                    current_x += ci.display_width;
+                }
+
+                if (current_x < x + width)
+                {
+                    Cell c;
+                    c.content = " ";
                     c.bg_color = c_bg;
                     c.fg_color = c_fg;
                     buffer.set(current_x++, y, c);
@@ -11474,7 +11140,7 @@ namespace cpptui
     class Checkbox : public Widget
     {
     public:
-        Checkbox(std::string label, bool checked = false) : label_(label), checked_(checked)
+        Checkbox(StyledText label, bool checked = false) : styled_label_(label), label_(label.plain_text()), checked_(checked)
         {
             height = 1;
             focusable = true;
@@ -11491,17 +11157,22 @@ namespace cpptui
         void render(Buffer &buffer) override
         {
             std::string prefix = checked_ ? checked_prefix : unchecked_prefix;
+            int prefix_chars = (int)TextHelper::prepare_text_for_render(prefix).size();
+
             std::string full_text = prefix + label_;
+            std::vector<CharInfo> chars = TextHelper::prepare_text_for_render(full_text);
 
             Color fg = text_color.resolve(Theme::current().foreground);
             Color focus = focus_color.resolve(Theme::current().primary);
             Color hover = hover_color.resolve(Theme::current().hover);
             Color bg = Theme::current().background;
 
-            for (int i = 0; i < std::min((int)full_text.length(), width); ++i)
+            int cell_x = 0;
+            for (size_t i = 0; i < chars.size() && cell_x < width; ++i)
             {
                 Cell cell;
-                cell.content = std::string(1, full_text[i]);
+                cell.content = chars[i].content;
+                cell.bg_color = bg;
 
                 if (has_focus())
                     cell.fg_color = focus;
@@ -11510,8 +11181,28 @@ namespace cpptui
                 else
                     cell.fg_color = fg;
 
-                cell.bg_color = bg;
-                buffer.set(x + i, y, cell);
+                // Apply styling to the label part
+                if ((int)i >= prefix_chars && !styled_label_.empty())
+                {
+                    if (const TextSpan *span = styled_label_.get_span_at_char((int)i - prefix_chars))
+                    {
+                        if (!span->color.is_default)
+                            cell.fg_color = span->color;
+                        cell.bold = span->bold;
+                        cell.italic = span->italic;
+                        cell.underline = span->underline;
+                    }
+                }
+
+                buffer.set(x + cell_x, y, cell);
+                if (chars[i].display_width == 2 && cell_x + 1 < width)
+                {
+                    Cell skip;
+                    skip.content = "";
+                    skip.bg_color = bg;
+                    buffer.set(x + cell_x + 1, y, skip);
+                }
+                cell_x += chars[i].display_width;
             }
         }
 
@@ -11560,6 +11251,7 @@ namespace cpptui
         std::function<void(bool)> on_change;
 
     private:
+        StyledText styled_label_;
         std::string label_;
         bool checked_;
     };
@@ -11698,6 +11390,7 @@ namespace cpptui
     class Tooltip : public Widget
     {
     public:
+        StyledText styled_text;
         std::string text;
         std::shared_ptr<Widget> target;
         int delay_ms = 500;
@@ -11719,7 +11412,7 @@ namespace cpptui
         Rect last_bounds;
         SelectionState selection_state_;
 
-        Tooltip(const std::string &t = "") : text(t) {}
+        Tooltip(const StyledText &t = StyledText("")) : styled_text(t), text(t.plain_text()) {}
 
         void attach(std::shared_ptr<Widget> w) { target = w; }
 
@@ -11905,13 +11598,27 @@ namespace cpptui
                     c.content = text.substr(pos, byte_len);
                     c.fg_color = selected ? sel_fg : fg;
                     c.bg_color = selected ? sel_bg : bg;
+
+                    // Apply styling from styled_text
+                    if (!selected && !styled_text.empty())
+                    {
+                        if (const TextSpan *span = styled_text.get_span_at_char(char_idx))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
                     buffer.set(tip_x + 2 + cell_x, tip_y + 1, c);
                     int dw = char_display_width(codepoint);
                     if (dw == 2)
                     {
                         Cell skip;
                         skip.content = "";
-                        skip.bg_color = selected ? sel_bg : bg;
+                        skip.bg_color = c.bg_color;
                         buffer.set(tip_x + 2 + cell_x + 1, tip_y + 1, skip);
                     }
                     cell_x += (dw > 0 ? dw : 1);
@@ -13138,12 +12845,12 @@ namespace cpptui
         struct Series
         {
             std::vector<double> values;
-            std::string label;
+            StyledText label;
             Color color;
         };
 
         std::vector<Series> series;
-        std::vector<std::string> categories; // Shared x-axis category labels
+        std::vector<StyledText> categories; // Shared x-axis category labels
 
         int bar_gap = 1;   // Gap between category groups
         int group_gap = 0; // Gap between bars within a group (usually 0)
@@ -13158,7 +12865,7 @@ namespace cpptui
             int series_index;
             int category_index;
             double value;
-            std::string category;
+            StyledText category;
         };
 
         mutable std::vector<BarHit> bar_hits_;
@@ -13167,7 +12874,7 @@ namespace cpptui
         // Custom formatter: Series Label, Category, Value -> String
         std::function<std::string(const std::string &, const std::string &, double)> tooltip_formatter;
 
-        void add_series(const std::vector<double> &v, const std::string &l, cpptui::Color c)
+        void add_series(const std::vector<double> &v, const StyledText &l, cpptui::Color c)
         {
             series.push_back({v, l, c});
         }
@@ -13194,18 +12901,18 @@ namespace cpptui
                         {
 
                             std::string text;
-                            std::string s_label = series[hit.series_index].label;
+                            StyledText s_label = series[hit.series_index].label;
 
                             if (tooltip_formatter)
                             {
-                                text = tooltip_formatter(s_label, hit.category, hit.value);
+                                text = tooltip_formatter(s_label.plain_text(), hit.category.plain_text(), hit.value);
                             }
                             else
                             {
                                 // Default format
                                 std::stringstream ss;
                                 ss << std::fixed << std::setprecision(2) << hit.value;
-                                text = s_label + " (" + hit.category + "): " + ss.str();
+                                text = s_label.plain_text() + " (" + hit.category.plain_text() + "): " + ss.str();
                             }
 
                             if (!tooltip_)
@@ -13480,23 +13187,42 @@ namespace cpptui
                 }
 
                 // Draw Category Label
-                std::string cat = categories[c_idx];
-                int cat_len = cat.size();
-                if (cat_len > slot_width)
-                    cat_len = slot_width; // Truncate
+                StyledText styled_cat = categories[c_idx];
+                std::string cat = styled_cat.plain_text();
+                int cat_dw = utf8_display_width(cat);
 
-                int label_x = slot_x + (slot_width - cat_len) / 2;
+                int label_x = slot_x + (slot_width - cat_dw) / 2;
                 int label_y = draw_y + height - 1;
 
                 Color lbl = label_color.resolve(Theme::current().foreground);
 
-                for (int k = 0; k < cat_len; ++k)
+                auto text_chars = TextHelper::prepare_text_for_render(cat);
+                int cell_x = 0;
+                for (size_t j = 0; j < text_chars.size(); ++j)
                 {
+                    if (cell_x >= slot_width)
+                        break;
+                    const auto &ci = text_chars[j];
                     Cell c;
-                    c.content = std::string(1, cat[k]);
+                    c.content = ci.content;
                     c.fg_color = lbl;
                     c.bg_color = bg;
-                    buffer.set(label_x + k, label_y, c);
+
+                    // Apply styling
+                    if (!styled_cat.empty())
+                    {
+                        if (const TextSpan *span = styled_cat.get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
+                    buffer.set(label_x + cell_x, label_y, c);
+                    cell_x += ci.display_width;
                 }
             }
 
@@ -13506,16 +13232,36 @@ namespace cpptui
                 int ly = draw_y;
                 for (const auto &s : series)
                 {
-                    int lx = draw_x + draw_width - s.label.size() - 2;
+                    std::string label = s.label.plain_text();
+                    int lx = draw_x + draw_width - utf8_display_width(label) - 2;
                     if (lx < draw_x)
                         lx = draw_x;
-                    for (int i = 0; i < s.label.size(); ++i)
+
+                    auto text_chars = TextHelper::prepare_text_for_render(label);
+                    int cell_x = 0;
+                    for (size_t i = 0; i < text_chars.size(); ++i)
                     {
+                        const auto &ci = text_chars[i];
                         Cell c;
-                        c.content = std::string(1, s.label[i]);
+                        c.content = ci.content;
                         c.fg_color = s.color;
                         c.bg_color = bg;
-                        buffer.set(lx + i, ly, c);
+
+                        // Apply styling
+                        if (!s.label.empty())
+                        {
+                            if (const TextSpan *span = s.label.get_span_at_char((int)i))
+                            {
+                                if (!span->color.is_default)
+                                    c.fg_color = span->color;
+                                c.bold = span->bold;
+                                c.italic = span->italic;
+                                c.underline = span->underline;
+                            }
+                        }
+
+                        buffer.set(lx + cell_x, ly, c);
+                        cell_x += ci.display_width;
                     }
                     ly++;
                 }
@@ -13694,6 +13440,7 @@ namespace cpptui
     class Badge : public Widget
     {
     public:
+        StyledText styled_text;
         std::string text;
         Color text_color = Color();
         Color badge_bg = Color();
@@ -13706,8 +13453,8 @@ namespace cpptui
         };
         Style style = Style::Pill;
 
-        Badge(const std::string &t = "", const Color &bg = Color(), const Color &fg = Color())
-            : text(t), badge_bg(bg), text_color(fg)
+        Badge(const StyledText &t = StyledText(""), const Color &bg = Color(), const Color &fg = Color())
+            : styled_text(t), text(t.plain_text()), badge_bg(bg), text_color(fg)
         {
             fixed_height = 1;
         }
@@ -13717,30 +13464,67 @@ namespace cpptui
             Color bg = badge_bg.resolve(Theme::current().primary);
             Color fg = text_color.is_default ? Color::contrast_color(bg) : text_color;
 
-            std::string display;
+            std::string prefix = "";
+            std::string suffix = "";
             if (style == Style::Pill)
             {
-                display = " " + text + " ";
+                prefix = " ";
+                suffix = " ";
             }
             else if (style == Style::Square)
             {
-                display = "[" + text + "]";
+                prefix = "[";
+                suffix = "]";
             }
             else
             {
-                display = "(" + text + ")";
+                prefix = "(";
+                suffix = ")";
+            }
+
+            int prefix_chars = (int)TextHelper::prepare_text_for_render(prefix).size();
+            std::string full_text = prefix + text + suffix;
+            std::vector<CharInfo> chars = TextHelper::prepare_text_for_render(full_text);
+
+            if (style == Style::Outline)
+            {
                 bg = Theme::current().background;
                 fg = badge_bg.resolve(Theme::current().primary);
             }
 
-            int w = std::min((int)display.size(), width);
-            for (int i = 0; i < w; ++i)
+            int cell_x = 0;
+            for (size_t i = 0; i < chars.size() && cell_x < width; ++i)
             {
                 Cell c;
-                c.content = std::string(1, display[i]);
+                c.content = chars[i].content;
                 c.fg_color = fg;
                 c.bg_color = bg;
-                buffer.set(x + i, y, c);
+
+                // Apply styling to the text part
+                if ((int)i >= prefix_chars && (int)i < prefix_chars + (int)TextHelper::prepare_text_for_render(text).size())
+                {
+                    if (!styled_text.empty())
+                    {
+                        if (const TextSpan *span = styled_text.get_span_at_char((int)i - prefix_chars))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+                }
+
+                buffer.set(x + cell_x, y, c);
+                if (chars[i].display_width == 2 && cell_x + 1 < width)
+                {
+                    Cell skip;
+                    skip.content = "";
+                    skip.bg_color = bg;
+                    buffer.set(x + cell_x + 1, y, skip);
+                }
+                cell_x += chars[i].display_width;
             }
         }
     };
@@ -13752,6 +13536,7 @@ namespace cpptui
         struct Shortcut
         {
             std::string key;
+            StyledText styled_description;
             std::string description;
         };
 
@@ -13764,9 +13549,9 @@ namespace cpptui
 
         ShortcutBar() { fixed_height = 1; }
 
-        void add(const std::string &key, const std::string &desc)
+        void add(const std::string &key, StyledText desc)
         {
-            items.push_back({key, desc});
+            items.push_back({key, desc, desc.plain_text()});
         }
 
         void render(Buffer &buffer) override
@@ -13818,6 +13603,7 @@ namespace cpptui
                 }
                 // Draw description - UTF-8 safe
                 pos = 0;
+                int char_idx = 0;
                 while (pos < item.description.size() && cx < x + width)
                 {
                     uint32_t codepoint;
@@ -13828,6 +13614,20 @@ namespace cpptui
                         c.content = item.description.substr(pos, byte_len);
                         c.fg_color = d_fg;
                         c.bg_color = bg;
+
+                        // Apply styling
+                        if (!item.styled_description.empty())
+                        {
+                            if (const TextSpan *span = item.styled_description.get_span_at_char(char_idx))
+                            {
+                                if (!span->color.is_default)
+                                    c.fg_color = span->color;
+                                c.bold = span->bold;
+                                c.italic = span->italic;
+                                c.underline = span->underline;
+                            }
+                        }
+
                         buffer.set(cx, y, c);
                         int dw = char_display_width(codepoint);
                         if (dw == 2 && cx + 1 < x + width)
@@ -13839,6 +13639,7 @@ namespace cpptui
                         }
                         cx += (dw > 0 ? dw : 1);
                         pos += byte_len;
+                        char_idx++;
                     }
                     else
                     {
@@ -13863,7 +13664,7 @@ namespace cpptui
     public:
         struct Section
         {
-            std::string content;
+            StyledText styled_content;
             int fixed_width = 0; // 0 = flexible
             Alignment align = Alignment::Left;
         };
@@ -13873,7 +13674,7 @@ namespace cpptui
 
         StatusBar() { fixed_height = 1; }
 
-        void add_section(const std::string &content, int width = 0, Alignment align = Alignment::Left)
+        void add_section(StyledText content, int width = 0, Alignment align = Alignment::Left)
         {
             sections.push_back({content, width, align});
         }
@@ -13883,62 +13684,6 @@ namespace cpptui
             Color bg = bg_color.resolve(Theme::current().panel_bg);
             Color fg = fg_color.resolve(Theme::current().foreground);
             Color sep_fg = Theme::current().border;
-
-            // Helper: count UTF-8 character count (not byte count)
-            auto utf8_char_count = [](const std::string &s) -> int
-            {
-                int count = 0;
-                for (size_t i = 0; i < s.size();)
-                {
-                    unsigned char c = static_cast<unsigned char>(s[i]);
-                    int char_len = 1;
-                    if ((c & 0x80) == 0)
-                        char_len = 1;
-                    else if ((c & 0xE0) == 0xC0)
-                        char_len = 2;
-                    else if ((c & 0xF0) == 0xE0)
-                        char_len = 3;
-                    else if ((c & 0xF8) == 0xF0)
-                        char_len = 4;
-                    i += char_len;
-                    count++;
-                }
-                return count;
-            };
-
-            // Helper: render UTF-8 string at position, returns number of cells used
-            auto render_utf8 = [&](const std::string &s, int start_x, int max_x, Color text_fg, Color text_bg) -> int
-            {
-                int cells = 0;
-                for (size_t i = 0; i < s.size();)
-                {
-                    unsigned char c = static_cast<unsigned char>(s[i]);
-                    int char_len = 1;
-                    if ((c & 0x80) == 0)
-                        char_len = 1;
-                    else if ((c & 0xE0) == 0xC0)
-                        char_len = 2;
-                    else if ((c & 0xF0) == 0xE0)
-                        char_len = 3;
-                    else if ((c & 0xF8) == 0xF0)
-                        char_len = 4;
-
-                    if (i + char_len > s.size())
-                        break; // Safety
-                    if (start_x + cells >= max_x)
-                        break; // Width check
-
-                    Cell cell;
-                    cell.content = s.substr(i, char_len);
-                    cell.fg_color = text_fg;
-                    cell.bg_color = text_bg;
-                    buffer.set(start_x + cells, y, cell);
-
-                    i += char_len;
-                    cells++;
-                }
-                return cells;
-            };
 
             // Fill background
             for (int i = 0; i < width; ++i)
@@ -13950,40 +13695,85 @@ namespace cpptui
             }
 
             int cx = x;
-            int sep_char_count = utf8_char_count(separator);
+            auto sep_chars = TextHelper::prepare_text_for_render(separator);
+            int sep_width = 0;
+            for (const auto &sc : sep_chars)
+                sep_width += sc.display_width;
 
             for (size_t idx = 0; idx < sections.size(); ++idx)
             {
                 const auto &sec = sections[idx];
+                auto chars = TextHelper::prepare_text_for_render(sec.styled_content.plain_text());
+                int content_display_width = 0;
+                for (const auto &ci : chars)
+                    content_display_width += ci.display_width;
 
-                int content_char_count = utf8_char_count(sec.content);
-                int sec_width = sec.fixed_width > 0 ? sec.fixed_width : content_char_count;
+                int sec_width = sec.fixed_width > 0 ? sec.fixed_width : content_display_width;
                 if (cx + sec_width > x + width)
                     sec_width = x + width - cx;
                 if (sec_width <= 0)
                     break;
 
-                int text_start = cx;
+                int text_start_dx = 0;
                 if (sec.align == Alignment::Center)
-                {
-                    text_start = cx + (sec_width - content_char_count) / 2;
-                }
+                    text_start_dx = (sec_width - content_display_width) / 2;
                 else if (sec.align == Alignment::Right)
-                {
-                    text_start = cx + sec_width - content_char_count;
-                }
-                if (text_start < cx)
-                    text_start = cx;
+                    text_start_dx = sec_width - content_display_width;
 
-                render_utf8(sec.content, text_start, x + width, fg, bg);
+                if (text_start_dx < 0)
+                    text_start_dx = 0;
+
+                int current_dx = 0;
+                for (size_t i = 0; i < chars.size(); ++i)
+                {
+                    if (text_start_dx + current_dx >= sec_width)
+                        break;
+
+                    Cell c;
+                    c.content = chars[i].content;
+                    c.fg_color = fg;
+                    c.bg_color = bg;
+
+                    // Apply styling
+                    if (!sec.styled_content.empty())
+                    {
+                        if (const TextSpan *span = sec.styled_content.get_span_at_char((int)i))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
+                    buffer.set(cx + text_start_dx + current_dx, y, c);
+                    if (chars[i].display_width == 2 && text_start_dx + current_dx + 1 < sec_width)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = bg;
+                        buffer.set(cx + text_start_dx + current_dx + 1, y, skip);
+                    }
+                    current_dx += chars[i].display_width;
+                }
 
                 cx += sec_width;
 
                 // Draw separator
-                if (idx < sections.size() - 1 && cx + sep_char_count <= x + width)
+                if (idx < sections.size() - 1 && cx + sep_width <= x + width)
                 {
-                    int cells_used = render_utf8(separator, cx, x + width, sep_fg, bg);
-                    cx += cells_used;
+                    int sep_cx = 0;
+                    for (const auto &sc : sep_chars)
+                    {
+                        Cell c;
+                        c.content = sc.content;
+                        c.fg_color = sep_fg;
+                        c.bg_color = bg;
+                        buffer.set(cx + sep_cx, y, c);
+                        sep_cx += sc.display_width;
+                    }
+                    cx += sep_width;
                 }
             }
         }
@@ -14216,7 +14006,7 @@ namespace cpptui
     public:
         struct Section
         {
-            std::string title;
+            StyledText title;
             std::shared_ptr<Widget> content;
             bool expanded = false;
         };
@@ -14232,7 +14022,7 @@ namespace cpptui
 
         Accordion() { focusable = true; }
 
-        void add_section(const std::string &title, std::shared_ptr<Widget> content, bool expanded = false)
+        void add_section(const StyledText &title, std::shared_ptr<Widget> content, bool expanded = false)
         {
             sections.push_back({title, content, expanded});
             children_.push_back(content);
@@ -14307,36 +14097,41 @@ namespace cpptui
                 ic.bg_color = eff_bg;
                 buffer.set(x + 1, cy, ic);
 
-                // UTF-8 safe title rendering
-                size_t pos = 0;
+                // UTF-8 safe title rendering with styling
+                auto title_chars = TextHelper::prepare_text_for_render(sec.title.plain_text());
                 int cell_x = 0;
-                while (pos < sec.title.size() && x + 3 + cell_x < x + width)
+                for (size_t j = 0; j < title_chars.size(); ++j)
                 {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(sec.title, pos, codepoint, byte_len))
-                    {
-                        Cell c;
-                        c.content = sec.title.substr(pos, byte_len);
-                        c.fg_color = h_fg;
-                        c.bg_color = eff_bg;
-                        buffer.set(x + 3 + cell_x, cy, c);
+                    if (x + 3 + cell_x >= x + width)
+                        break;
+                    const auto &ci = title_chars[j];
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = h_fg;
+                    c.bg_color = eff_bg;
 
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2 && x + 3 + cell_x + 1 < x + width)
-                        {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = eff_bg;
-                            buffer.set(x + 3 + cell_x + 1, cy, skip);
-                        }
-                        cell_x += (dw > 0 ? dw : 1);
-                        pos += byte_len;
-                    }
-                    else
+                    // Apply styling
+                    if (!sec.title.empty())
                     {
-                        pos++;
+                        if (const TextSpan *span = sec.title.get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
                     }
+
+                    buffer.set(x + 3 + cell_x, cy, c);
+                    if (ci.display_width == 2 && x + 3 + cell_x + 1 < x + width)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = eff_bg;
+                        buffer.set(x + 3 + cell_x + 1, cy, skip);
+                    }
+                    cell_x += ci.display_width;
                 }
                 cy++;
 
@@ -14418,7 +14213,7 @@ namespace cpptui
     public:
         struct Item
         {
-            std::string label;
+            StyledText label;
             std::function<void()> on_click;
         };
 
@@ -14438,7 +14233,7 @@ namespace cpptui
             tab_stop = true;
         }
 
-        void add(const std::string &label, std::function<void()> on_click = nullptr)
+        void add(StyledText label, std::function<void()> on_click = nullptr)
         {
             items.push_back({label, on_click});
         }
@@ -14460,36 +14255,41 @@ namespace cpptui
                 Color item_bg = is_selected ? Theme::current().selection : bg;
 
                 // UTF-8 safe label rendering
-                const std::string &label = items[i].label;
-                size_t pos = 0;
-                while (pos < label.size() && cx < x + width)
+                StyledText styled_lbl = items[i].label;
+                auto text_chars = TextHelper::prepare_text_for_render(styled_lbl.plain_text());
+                for (size_t j = 0; j < text_chars.size(); ++j)
                 {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(label, pos, codepoint, byte_len))
-                    {
-                        Cell c;
-                        c.content = label.substr(pos, byte_len);
-                        c.fg_color = fg;
-                        c.bg_color = item_bg;
-                        c.underline = (is_hover || is_selected) && !is_last;
-                        buffer.set(cx, y, c);
+                    if (cx >= x + width)
+                        break;
+                    const auto &ci = text_chars[j];
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = fg;
+                    c.bg_color = item_bg;
+                    c.underline = (is_hover || is_selected) && !is_last;
 
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2 && cx + 1 < x + width)
-                        {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = item_bg;
-                            buffer.set(cx + 1, y, skip);
-                        }
-                        cx += (dw > 0 ? dw : 1);
-                        pos += byte_len;
-                    }
-                    else
+                    // Apply styling
+                    if (!styled_lbl.empty())
                     {
-                        pos++;
+                        if (const TextSpan *span = styled_lbl.get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline |= span->underline;
+                        }
                     }
+
+                    buffer.set(cx, y, c);
+                    if (ci.display_width == 2 && cx + 1 < x + width)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = item_bg;
+                        buffer.set(cx + 1, y, skip);
+                    }
+                    cx += ci.display_width;
                 }
 
                 // UTF-8 safe separator rendering
@@ -14590,8 +14390,8 @@ namespace cpptui
     {
     public:
         std::vector<std::vector<double>> data; // 2D data grid, values 0-1
-        std::vector<std::string> row_labels;
-        std::vector<std::string> col_labels;
+        std::vector<StyledText> row_labels;
+        std::vector<StyledText> col_labels;
         bool show_values = false;
 
         Color low_color = Color(0, 0, 128);
@@ -14611,8 +14411,9 @@ namespace cpptui
             int label_width = 0;
             for (const auto &lbl : row_labels)
             {
-                if ((int)lbl.size() > label_width)
-                    label_width = lbl.size();
+                int w = utf8_display_width(lbl.plain_text());
+                if (w > label_width)
+                    label_width = w;
             }
             label_width = std::min(label_width + 1, 10);
 
@@ -14624,35 +14425,41 @@ namespace cpptui
                 // Row label - UTF-8 safe
                 if (r < (int)row_labels.size())
                 {
-                    const std::string &lbl = row_labels[r];
-                    size_t pos = 0;
+                    StyledText styled_lbl = row_labels[r];
+                    auto text_chars = TextHelper::prepare_text_for_render(styled_lbl.plain_text());
                     int cell_x = 0;
-                    while (pos < lbl.size() && cell_x < label_width)
+                    for (size_t j = 0; j < text_chars.size(); ++j)
                     {
-                        uint32_t codepoint;
-                        int byte_len;
-                        if (utf8_decode_codepoint(lbl, pos, codepoint, byte_len))
+                        if (cell_x >= label_width)
+                            break;
+                        const auto &ci = text_chars[j];
+                        Cell c;
+                        c.content = ci.content;
+                        c.fg_color = Theme::current().foreground;
+                        c.bg_color = bg;
+
+                        // Apply styling
+                        if (!styled_lbl.empty())
                         {
-                            Cell c;
-                            c.content = lbl.substr(pos, byte_len);
-                            c.fg_color = Theme::current().foreground;
-                            c.bg_color = bg;
-                            buffer.set(x + cell_x, y + r * cell_h, c);
-                            int dw = char_display_width(codepoint);
-                            if (dw == 2 && cell_x + 1 < label_width)
+                            if (const TextSpan *span = styled_lbl.get_span_at_char((int)j))
                             {
-                                Cell skip;
-                                skip.content = "";
-                                skip.bg_color = bg;
-                                buffer.set(x + cell_x + 1, y + r * cell_h, skip);
+                                if (!span->color.is_default)
+                                    c.fg_color = span->color;
+                                c.bold = span->bold;
+                                c.italic = span->italic;
+                                c.underline = span->underline;
                             }
-                            cell_x += (dw > 0 ? dw : 1);
-                            pos += byte_len;
                         }
-                        else
+
+                        buffer.set(x + cell_x, y + r * cell_h, c);
+                        if (ci.display_width == 2 && cell_x + 1 < label_width)
                         {
-                            pos++;
+                            Cell skip;
+                            skip.content = "";
+                            skip.bg_color = bg;
+                            buffer.set(x + cell_x + 1, y + r * cell_h, skip);
                         }
+                        cell_x += ci.display_width;
                     }
                 }
 
@@ -15241,6 +15048,7 @@ namespace cpptui
 
         struct Message
         {
+            StyledText styled_text;
             std::string text;
             Type type;
             int duration_ms;
@@ -15275,9 +15083,9 @@ namespace cpptui
             return false;
         }
 
-        void show(const std::string &text, Type type = Type::Info, int duration_ms = 3000)
+        void show(StyledText text, Type type = Type::Info, int duration_ms = 3000)
         {
-            queue.push_back({text, type, duration_ms, std::chrono::steady_clock::now()});
+            queue.push_back({text, text.plain_text(), type, duration_ms, std::chrono::steady_clock::now()});
         }
 
         void update()
@@ -15556,6 +15364,20 @@ namespace cpptui
                     c.content = ci.content;
                     c.fg_color = selected ? sel_fg : fg;
                     c.bg_color = selected ? sel_bg : bg;
+
+                    // Apply styling
+                    if (!selected && !msg.styled_text.empty())
+                    {
+                        if (const TextSpan *span = msg.styled_text.get_span_at_char(char_idx))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
                     buffer.set(toast_x + 4 + cell_x, toast_y, c);
 
                     if (ci.display_width == 2)
@@ -15900,8 +15722,8 @@ namespace cpptui
     class Tabs : public Container
     {
     public:
-        std::vector<std::string> tab_names; ///< Labels for each tab
-        int current_tab = 0;                ///< Index of the currently active tab
+        std::vector<StyledText> tab_names; ///< Labels for each tab
+        int current_tab = 0;               ///< Index of the currently active tab
 
         // Overflow Handling
         int scroll_offset_ = 0;         ///< Horizontal scroll offset for tab buttons
@@ -15929,7 +15751,7 @@ namespace cpptui
         }
 
         // Add a tab with a name and content widget
-        void add_tab(const std::string &name, std::shared_ptr<Widget> content)
+        void add_tab(StyledText name, std::shared_ptr<Widget> content)
         {
             tab_names.push_back(name);
             add(content);
@@ -16031,7 +15853,7 @@ namespace cpptui
             int total_needed = 0;
             for (const auto &name : tab_names)
             {
-                total_needed += utf8_display_width(name) + 2 + 1; // " " + name + " " + gap
+                total_needed += utf8_display_width(name.plain_text()) + 2 + 1; // " " + name + " " + gap
             }
 
             int max_w = width;
@@ -16324,12 +16146,22 @@ namespace cpptui
     class TablePaginated : public Container
     {
     public:
-        std::vector<std::string> columns;           ///< Column headers
-        std::vector<std::vector<std::string>> rows; ///< Data rows
+        std::vector<StyledText> columns;           ///< Column headers
+        std::vector<std::vector<StyledText>> rows; ///< Data rows
 
         int page_size = 5;           ///< Number of rows per page
         bool auto_page_size = false; ///< If true, calculate page size based on height
         int current_page = 0;        ///< Current page index (0-based)
+
+        // Helper to add a row of strings
+        void add_row(const std::vector<std::string> &row)
+        {
+            std::vector<StyledText> styled_row;
+            styled_row.reserve(row.size());
+            for (const auto &s : row)
+                styled_row.emplace_back(s);
+            rows.push_back(std::move(styled_row));
+        }
 
         // Visuals
         Color header_bg_color = Color(); ///< Header background color
@@ -16731,8 +16563,9 @@ namespace cpptui
                 if (i == num_cols - 1)
                     current_cw = width - (current_x_offset - x);
 
-                std::string text = columns[i];
-                int text_dw = utf8_display_width(text);
+                StyledText styled_text = columns[i];
+                auto text_chars = TextHelper::prepare_text_for_render(styled_text.plain_text());
+                int text_dw = utf8_display_width(styled_text.plain_text());
                 int padding = (current_cw - text_dw) / 2;
                 if (padding < 0)
                     padding = 0;
@@ -16747,35 +16580,39 @@ namespace cpptui
                     buffer.set(current_x_offset + k, draw_y, c);
                 }
 
-                // UTF-8 safe text rendering
-                size_t pos = 0;
                 int cell_x = 0;
-                while (pos < text.size() && padding + cell_x < current_cw)
+                for (size_t j = 0; j < text_chars.size(); ++j)
                 {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(text, pos, codepoint, byte_len))
+                    if (padding + cell_x >= current_cw)
+                        break;
+                    const auto &ci = text_chars[j];
+                    Cell c;
+                    c.fg_color = hfg;
+                    c.bg_color = hbg;
+                    c.content = ci.content;
+
+                    // Apply styling
+                    if (!styled_text.empty())
                     {
-                        Cell c;
-                        c.fg_color = hfg;
-                        c.bg_color = hbg;
-                        c.content = text.substr(pos, byte_len);
-                        buffer.set(current_x_offset + padding + cell_x, draw_y, c);
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2 && padding + cell_x + 1 < current_cw)
+                        if (const TextSpan *span = styled_text.get_span_at_char((int)j))
                         {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = hbg;
-                            buffer.set(current_x_offset + padding + cell_x + 1, draw_y, skip);
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
                         }
-                        cell_x += (dw > 0 ? dw : 1);
-                        pos += byte_len;
                     }
-                    else
+
+                    buffer.set(current_x_offset + padding + cell_x, draw_y, c);
+                    if (ci.display_width == 2 && padding + cell_x + 1 < current_cw)
                     {
-                        pos++;
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = hbg;
+                        buffer.set(current_x_offset + padding + cell_x + 1, draw_y, skip);
                     }
+                    cell_x += ci.display_width;
                 }
 
                 current_x_offset += current_cw;
@@ -16817,12 +16654,11 @@ namespace cpptui
                     if (i == num_cols - 1)
                         current_cw = width - (current_x_offset - x);
 
-                    std::string text = "";
-                    if (!is_empty && i < rows[r].size())
-                        text = rows[r][i];
-                    int text_dw = utf8_display_width(text);
-                    if (text_dw > current_cw - 2)
-                        text = text.substr(0, current_cw - 2);
+                    StyledText styled_cell = "";
+                    if (!is_empty && i < (int)rows[r].size())
+                        styled_cell = rows[r][i];
+
+                    auto text_chars = TextHelper::prepare_text_for_render(styled_cell.plain_text());
 
                     // Fill with spaces first
                     for (int k = 0; k < current_cw; ++k)
@@ -16834,35 +16670,39 @@ namespace cpptui
                         buffer.set(current_x_offset + k, draw_y, c);
                     }
 
-                    // UTF-8 safe cell rendering (with left padding of 1)
-                    size_t pos = 0;
                     int cell_x = 0;
-                    while (pos < text.size() && 1 + cell_x < current_cw)
+                    for (size_t j = 0; j < text_chars.size(); ++j)
                     {
-                        uint32_t codepoint;
-                        int byte_len;
-                        if (utf8_decode_codepoint(text, pos, codepoint, byte_len))
+                        if (1 + cell_x >= current_cw)
+                            break;
+                        const auto &ci = text_chars[j];
+                        Cell c;
+                        c.bg_color = cell_bg;
+                        c.fg_color = cell_fg;
+                        c.content = ci.content;
+
+                        // Apply styling
+                        if (!styled_cell.empty())
                         {
-                            Cell c;
-                            c.bg_color = cell_bg;
-                            c.fg_color = cell_fg;
-                            c.content = text.substr(pos, byte_len);
-                            buffer.set(current_x_offset + 1 + cell_x, draw_y, c);
-                            int dw = char_display_width(codepoint);
-                            if (dw == 2 && 1 + cell_x + 1 < current_cw)
+                            if (const TextSpan *span = styled_cell.get_span_at_char((int)j))
                             {
-                                Cell skip;
-                                skip.content = "";
-                                skip.bg_color = cell_bg;
-                                buffer.set(current_x_offset + 1 + cell_x + 1, draw_y, skip);
+                                if (!span->color.is_default)
+                                    c.fg_color = span->color;
+                                c.bold = span->bold;
+                                c.italic = span->italic;
+                                c.underline = span->underline;
                             }
-                            cell_x += (dw > 0 ? dw : 1);
-                            pos += byte_len;
                         }
-                        else
+
+                        buffer.set(current_x_offset + 1 + cell_x, draw_y, c);
+                        if (ci.display_width == 2 && 1 + cell_x + 1 < current_cw)
                         {
-                            pos++;
+                            Cell skip;
+                            skip.content = "";
+                            skip.bg_color = cell_bg;
+                            buffer.set(current_x_offset + 1 + cell_x + 1, draw_y, skip);
                         }
+                        cell_x += ci.display_width;
                     }
 
                     current_x_offset += current_cw;
@@ -16927,14 +16767,24 @@ namespace cpptui
     class TableScrollable : public Widget
     {
     public:
-        std::vector<std::string> columns;           ///< Column headers
-        std::vector<std::vector<std::string>> rows; ///< Data rows
-        std::vector<int> col_widths;                ///< Optional explicit column widths
+        std::vector<StyledText> columns;           ///< Column headers
+        std::vector<std::vector<StyledText>> rows; ///< Data rows
+        std::vector<int> col_widths;               ///< Optional explicit column widths
 
         int selected_index = 0; ///< Index of the currently selected row
         int scroll_offset = 0;  ///< Current vertical scroll position
 
         int hovered_row = -1;
+
+        // Helper to add a row of strings
+        void add_row(const std::vector<std::string> &row)
+        {
+            std::vector<StyledText> styled_row;
+            styled_row.reserve(row.size());
+            for (const auto &s : row)
+                styled_row.emplace_back(s);
+            rows.push_back(std::move(styled_row));
+        }
 
         // Style options
         Color header_color = Color();      // Default: panel_bg/primary
@@ -16943,6 +16793,7 @@ namespace cpptui
         Color row_fg_color = Color();      // Default: foreground
 
         std::function<void(int)> on_change; ///< Callback when selection changes
+        std::function<void(int)> on_submit; ///< Callback on double-click or Enter
 
         // Scrollbar Configuration
         Color scrollbar_track_color = Color();
@@ -17090,6 +16941,8 @@ namespace cpptui
                                 selected_index = clicked_index;
                                 if (on_change)
                                     on_change(selected_index);
+                                if (event.click_count >= 2 && on_submit)
+                                    on_submit(selected_index);
                                 return true;
                             }
                         }
@@ -17147,6 +17000,12 @@ namespace cpptui
                     selected_index = (int)rows.size() - 1;
                     changed = true;
                 }
+                else if (event.is_enter())
+                {
+                    if (on_submit)
+                        on_submit(selected_index);
+                    return true;
+                }
 
                 if (changed)
                 {
@@ -17199,49 +17058,52 @@ namespace cpptui
             for (size_t i = 0; i < columns.size(); ++i)
             {
                 int cw = (i < current_widths.size()) ? current_widths[i] : 10;
-                std::string text = columns[i];
-                int text_dw = utf8_display_width(text);
-                if (text_dw > cw)
-                    text = text.substr(0, cw); // Simple truncation (could improve)
+                StyledText styled_text = columns[i];
+                auto text_chars = TextHelper::prepare_text_for_render(styled_text.plain_text());
 
-                // UTF-8 safe header rendering
-                size_t pos = 0;
-                int cell_x = 0;
-                while (pos < text.size() && cell_x < cw)
-                {
-                    uint32_t codepoint;
-                    int byte_len;
-                    if (utf8_decode_codepoint(text, pos, codepoint, byte_len))
-                    {
-                        Cell c;
-                        c.fg_color = h_fg;
-                        c.bg_color = h_col;
-                        c.content = text.substr(pos, byte_len);
-                        buffer.set(cx + cell_x, draw_y, c);
-                        int dw = char_display_width(codepoint);
-                        if (dw == 2 && cell_x + 1 < cw)
-                        {
-                            Cell skip;
-                            skip.content = "";
-                            skip.bg_color = h_col;
-                            buffer.set(cx + cell_x + 1, draw_y, skip);
-                        }
-                        cell_x += (dw > 0 ? dw : 1);
-                        pos += byte_len;
-                    }
-                    else
-                    {
-                        pos++;
-                    }
-                }
-                // Fill remaining space
-                for (int k = cell_x; k < cw; ++k)
+                // Fill with spaces first
+                for (int k = 0; k < cw; ++k)
                 {
                     Cell c;
                     c.fg_color = h_fg;
                     c.bg_color = h_col;
                     c.content = " ";
                     buffer.set(cx + k, draw_y, c);
+                }
+
+                int cell_x = 0;
+                for (size_t j = 0; j < text_chars.size(); ++j)
+                {
+                    if (cell_x >= cw)
+                        break;
+                    const auto &ci = text_chars[j];
+                    Cell c;
+                    c.fg_color = h_fg;
+                    c.bg_color = h_col;
+                    c.content = ci.content;
+
+                    // Apply styling
+                    if (!styled_text.empty())
+                    {
+                        if (const TextSpan *span = styled_text.get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
+                    buffer.set(cx + cell_x, draw_y, c);
+                    if (ci.display_width == 2 && cell_x + 1 < cw)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = h_col;
+                        buffer.set(cx + cell_x + 1, draw_y, skip);
+                    }
+                    cell_x += ci.display_width;
                 }
                 cx += cw;
             }
@@ -17270,25 +17132,55 @@ namespace cpptui
                 for (size_t i = 0; i < columns.size(); ++i)
                 {
                     int cw = (i < current_widths.size()) ? current_widths[i] : 10;
-                    std::string text = (i < row_data.size()) ? row_data[i] : "";
-                    int text_dw = utf8_display_width(text);
-                    if (text_dw > cw)
-                        text = text.substr(0, cw);
+                    StyledText styled_cell = (i < row_data.size()) ? row_data[i] : StyledText("");
 
                     Color cell_bg = is_sel ? sel_bg : (r == hovered_row ? Theme::current().hover : row_bg);
                     Color cell_fg = is_sel ? sel_fg : row_fg;
 
-                    // Cells using render_utf8_text for consistent UTF-8 and width handling
-                    int cell_x = render_utf8_text(buffer, text, cx, draw_y, cw, cell_fg, cell_bg);
-
-                    // Fill remaining space if any
-                    for (int k = cell_x; k < cw; ++k)
+                    // Fill with spaces first
+                    for (int k = 0; k < cw; ++k)
                     {
                         Cell c;
                         c.bg_color = cell_bg;
                         c.fg_color = cell_fg;
                         c.content = " ";
                         buffer.set(cx + k, draw_y, c);
+                    }
+
+                    auto text_chars = TextHelper::prepare_text_for_render(styled_cell.plain_text());
+                    int cell_x = 0;
+                    for (size_t j = 0; j < text_chars.size(); ++j)
+                    {
+                        if (cell_x >= cw)
+                            break;
+                        const auto &ci = text_chars[j];
+                        Cell c;
+                        c.content = ci.content;
+                        c.bg_color = cell_bg;
+                        c.fg_color = cell_fg;
+
+                        // Apply styling
+                        if (!styled_cell.empty())
+                        {
+                            if (const TextSpan *span = styled_cell.get_span_at_char((int)j))
+                            {
+                                if (!span->color.is_default)
+                                    c.fg_color = span->color;
+                                c.bold = span->bold;
+                                c.italic = span->italic;
+                                c.underline = span->underline;
+                            }
+                        }
+
+                        buffer.set(cx + cell_x, draw_y, c);
+                        if (ci.display_width == 2 && cell_x + 1 < cw)
+                        {
+                            Cell skip;
+                            skip.content = "";
+                            skip.bg_color = cell_bg;
+                            buffer.set(cx + cell_x + 1, draw_y, skip);
+                        }
+                        cell_x += ci.display_width;
                     }
                     cx += cw;
                 }
@@ -18345,7 +18237,7 @@ namespace cpptui
                 int found = -1;
                 for (size_t i = 0; i < items.size(); ++i)
                 {
-                    int w = items[i].label.length() + 2; // spaces
+                    int w = utf8_display_width(items[i].label) + 2; // spaces
                     if (rel_x >= current_x && rel_x < current_x + w)
                     {
                         found = i;
@@ -18377,7 +18269,7 @@ namespace cpptui
                             // Recalculate start_x for the found item to position popup correctly
                             int start_x = 0;
                             for (int k = 0; k < found; ++k)
-                                start_x += items[k].label.length() + 2;
+                                start_x += utf8_display_width(items[k].label) + 2;
 
                             if (app_)
                                 app_->open_dialog(menu, x + 1 + start_x, y + 1);
@@ -18404,14 +18296,14 @@ namespace cpptui
     class DropdownDialog : public Dialog
     {
     public:
-        std::vector<std::string> options;
+        std::vector<StyledText> options;
         int selected_index = -1;
         std::function<void(int)> on_select;
         std::function<void()> on_close;
 
         DropdownDialog(App *app) : Dialog(app, BorderStyle::Single)
         {
-            shadow = true;
+            shadow = false;
             modal = false; // Allow click-through to close
             bg_color_ = Theme::current().panel_bg;
             // No title
@@ -18497,10 +18389,7 @@ namespace cpptui
                 int row_y = y + 1 + i;
                 bool is_sel = ((int)i == selected_index);
 
-                std::string opt_text = options[i];
                 int avail_w = width - 2;
-                int opt_dw = utf8_display_width(opt_text);
-
                 Color row_bg = is_sel ? sel_bg : list_bg;
                 Color row_fg = is_sel ? sel_fg : list_fg;
 
@@ -18514,8 +18403,39 @@ namespace cpptui
                     buffer.set(x + 1 + k, row_y, c);
                 }
 
-                // UTF-8 safe rendering using render_utf8_text
-                render_utf8_text(buffer, opt_text, x + 1, row_y, avail_w, row_fg, row_bg);
+                auto label_chars = TextHelper::prepare_text_for_render(options[i].plain_text());
+                for (size_t j = 0; j < label_chars.size(); ++j)
+                {
+                    if ((int)j >= avail_w)
+                        break;
+                    const auto &ci = label_chars[j];
+                    Cell c;
+                    c.content = ci.content;
+                    c.fg_color = row_fg;
+                    c.bg_color = row_bg;
+
+                    // Apply styling
+                    if (!options[i].empty())
+                    {
+                        if (const TextSpan *span = options[i].get_span_at_char((int)j))
+                        {
+                            if (!span->color.is_default)
+                                c.fg_color = span->color;
+                            c.bold = span->bold;
+                            c.italic = span->italic;
+                            c.underline = span->underline;
+                        }
+                    }
+
+                    buffer.set(x + 1 + j, row_y, c);
+                    if (ci.display_width == 2 && (int)j + 1 < avail_w)
+                    {
+                        Cell skip;
+                        skip.content = "";
+                        skip.bg_color = row_bg;
+                        buffer.set(x + 1 + j + 1, row_y, skip);
+                    }
+                }
             }
         }
     };
@@ -18862,8 +18782,8 @@ namespace cpptui
     class SearchInput : public Container
     {
     public:
-        std::string placeholder = "Search...";
-        std::vector<std::string> suggestions;
+        StyledText placeholder = "Search...";
+        std::vector<StyledText> suggestions;
         std::function<void(const std::string &)> on_search;
         std::function<void(const std::string &)> on_change;
 
@@ -19009,7 +18929,7 @@ namespace cpptui
 
     private:
         std::shared_ptr<Input> input_;
-        std::vector<std::string> filtered_suggestions_;
+        std::vector<StyledText> filtered_suggestions_;
         std::string last_input_val_;
 
         void filter_suggestions(const std::string &query, bool force = false)
@@ -19039,9 +18959,11 @@ namespace cpptui
 
                 for (const auto &s : suggestions)
                 {
-                    std::string lower_s = s;
+                    std::string label = s.plain_text();
+                    std::string lower_s = label;
                     for (char &c : lower_s)
                         c = std::tolower(c);
+
                     if (lower_s.find(lower_query) != std::string::npos)
                     {
                         filtered_suggestions_.push_back(s);
@@ -19068,14 +18990,14 @@ namespace cpptui
                         if (dlg->width < 10)
                             dlg->width = 10;
                         dlg->fixed_width = dlg->width;
-                        dlg->height = filtered_suggestions_.size() + 2;
+                        dlg->height = (int)filtered_suggestions_.size() + 2;
                         dlg->fixed_height = dlg->height;
 
                         dlg->on_select = [this](int idx)
                         {
                             if (idx >= 0 && idx < (int)filtered_suggestions_.size())
                             {
-                                input_->set_value(filtered_suggestions_[idx]);
+                                input_->set_value(filtered_suggestions_[idx].plain_text());
                                 last_input_val_ = input_->get_value(); // Update last val to suppress trigger
                                 // Note: Don't call close_popup() here - DropdownDialog handles closing
                                 // Just reset our state; dialog will be closed by DropdownDialog::on_event
@@ -19094,7 +19016,7 @@ namespace cpptui
                 {
                     // Update existing popup
                     dlg->options = filtered_suggestions_;
-                    dlg->height = filtered_suggestions_.size() + 2;
+                    dlg->height = (int)filtered_suggestions_.size() + 2;
                     dlg->fixed_height = dlg->height;
                 }
             }
@@ -19106,9 +19028,9 @@ namespace cpptui
 
             selected_suggestion_ = filtered_suggestions_.empty() ? -1 : 0;
             // Sync selection to popup
-            auto dlg = popup_ref_.lock();
-            if (dlg)
-                dlg->selected_index = selected_suggestion_;
+            auto dlg_sync = popup_ref_.lock();
+            if (dlg_sync)
+                dlg_sync->selected_index = selected_suggestion_;
         }
 
         void close_popup()
