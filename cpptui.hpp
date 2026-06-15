@@ -16,13 +16,10 @@
 #include <vector>
 #include <functional>
 #include <chrono>
-#include <thread>
 #include <memory>
 #include <sstream>
 #include <csignal>
-#include <deque>
 #include <regex>
-#include <fstream>
 #include <cstdlib>
 #include <cmath>
 #include <iomanip>
@@ -30,7 +27,6 @@
 #include <cstdio>
 #include <algorithm>
 #include <filesystem>
-#include <atomic>
 #include <optional>
 #include <mutex>
 
@@ -97,7 +93,7 @@ namespace cpptui
 
     inline volatile std::sig_atomic_t g_resize_pending = 0;
 
-    inline void handle_winch(int sig)
+    inline void handle_winch([[maybe_unused]] int sig)
     {
         g_resize_pending = 1;
     }
@@ -3058,7 +3054,7 @@ namespace cpptui
         /// @brief Handle an input event
         /// @param event The event to process
         /// @return true if the event was consumed, false otherwise
-        virtual bool on_event(const Event &event) { return false; }
+        virtual bool on_event(const Event &) { return false; }
 
         // Focus management
         bool focusable = false; ///< If true, can receive focus (via click or tab)
@@ -3175,7 +3171,7 @@ namespace cpptui
         }
 
         /// @brief Update internal visibility based on current global screen size
-        void update_responsive()
+        virtual void update_responsive()
         {
             if (is_responsive)
             {
@@ -3778,11 +3774,11 @@ namespace cpptui
     class Paragraph : public Widget
     {
     public:
-        /// Plain text content (used if styled_content is empty)
-        std::string text;
-
         /// Styled content with mixed formatting
         StyledText styled_content;
+
+        /// Plain text content (used if styled_content is empty)
+        std::string text;
 
         /// Indentation settings
         int first_line_indent = 0; ///< Spaces before first line
@@ -3790,6 +3786,10 @@ namespace cpptui
 
         /// Word wrapping
         bool word_wrap = true; ///< If true, wrap at word boundaries
+
+        /// When true, preserves original whitespace during wrapping instead of normalizing to single spaces.
+        /// Defaults to false for backward compatibility.
+        bool preserve_whitespace = false;
 
         /// Default text styling (for plain text)
         bool bold = false;      ///< Render in bold
@@ -3832,7 +3832,7 @@ namespace cpptui
 
             std::vector<std::string> lines;
             if (word_wrap)
-                lines = wrap_text_static(plain, width, first_line_indent, hanging_indent);
+                lines = wrap_text_static(plain, width, first_line_indent, hanging_indent, preserve_whitespace);
             else
             {
                 std::istringstream stream(plain);
@@ -4010,7 +4010,7 @@ namespace cpptui
             const std::string &plain = text;
             std::vector<std::string> lines;
             if (word_wrap)
-                lines = wrap_text_static(plain, width, first_line_indent, hanging_indent);
+                lines = wrap_text_static(plain, width, first_line_indent, hanging_indent, preserve_whitespace);
             else
             {
                 std::istringstream stream(plain);
@@ -4056,7 +4056,7 @@ namespace cpptui
             selection_state_.end = e;
         }
 
-        static std::vector<std::string> wrap_text_static(const std::string &input, int max_width, int first_indent, int hang_indent)
+        static std::vector<std::string> wrap_text_static(const std::string &input, int max_width, int first_indent, int hang_indent, bool preserve_ws = false)
         {
             std::vector<std::string> result;
             int first_width = max_width - first_indent;
@@ -4075,34 +4075,121 @@ namespace cpptui
                     result.push_back("");
                     continue;
                 }
-                std::vector<std::string> words;
-                std::istringstream word_stream(paragraph_line);
-                std::string word;
-                while (word_stream >> word)
-                    words.push_back(word);
-                if (words.empty())
-                {
-                    result.push_back("");
-                    continue;
-                }
 
-                std::string current_line;
-                int current_width = result.empty() ? first_width : other_width;
-                for (const auto &w : words)
+                /* Legacy mode: use stream extraction which normalizes whitespace. */
+                if (!preserve_ws)
                 {
-                    if (current_line.empty())
-                        current_line = w;
-                    else if ((int)(current_line.length() + 1 + w.length()) <= current_width)
-                        current_line += " " + w;
-                    else
+                    std::vector<std::string> words;
+                    std::istringstream word_stream(paragraph_line);
+                    std::string word;
+                    while (word_stream >> word)
+                        words.push_back(word);
+
+                    if (words.empty())
                     {
-                        result.push_back(current_line);
-                        current_line = w;
-                        current_width = other_width;
+                        result.push_back("");
+                        continue;
                     }
+
+                    std::string current_line;
+                    int current_width = result.empty() ? first_width : other_width;
+                    for (const auto &w : words)
+                    {
+                        if (current_line.empty())
+                            current_line = w;
+                        else if ((int)(current_line.length() + 1 + w.length()) <= current_width)
+                            current_line += " " + w;
+                        else
+                        {
+                            result.push_back(current_line);
+                            current_line = w;
+                            current_width = other_width;
+                        }
+                    }
+                    if (!current_line.empty())
+                        result.push_back(current_line);
                 }
-                if (!current_line.empty())
-                    result.push_back(current_line);
+                /* Preserve mode: tokenize with exact whitespace tracking. */
+                else
+                {
+                    struct WordToken
+                    {
+                        std::string word;       ///< Non-whitespace content (with leading ws prepended)
+                        std::string ws;         ///< Trailing whitespace after the word
+                    };
+                    std::vector<WordToken> words;
+
+                    size_t i = 0;
+                    bool first_token = true;
+                    while (i < paragraph_line.size())
+                    {
+                        /* Capture leading whitespace and prepend to next word */
+                        std::string leading_ws;
+                        if (first_token)
+                        {
+                            size_t ws_start = i;
+                            while (i < paragraph_line.size() && std::isspace(static_cast<unsigned char>(paragraph_line[i])))
+                                ++i;
+                            leading_ws.assign(paragraph_line, ws_start, i - ws_start);
+                            first_token = false;
+                        }
+
+                        if (i >= paragraph_line.size())
+                        {
+                            /* Line is only whitespace */
+                            words.push_back({"", leading_ws});
+                            break;
+                        }
+
+                        /* Collect word characters */
+                        size_t start = i;
+                        while (i < paragraph_line.size() && !std::isspace(static_cast<unsigned char>(paragraph_line[i])))
+                            ++i;
+                        std::string w(paragraph_line, start, i - start);
+
+                        /* Capture trailing whitespace after this word */
+                        size_t ws_start2 = i;
+                        while (i < paragraph_line.size() && std::isspace(static_cast<unsigned char>(paragraph_line[i])))
+                            ++i;
+                        std::string trailing_ws(paragraph_line, ws_start2, i - ws_start2);
+
+                        words.push_back({leading_ws + w, trailing_ws});
+                    }
+
+                    if (words.empty())
+                    {
+                        result.push_back("");
+                        continue;
+                    }
+
+                    /* Rebuild lines preserving original whitespace between words */
+                    std::string current_line;
+                    int current_width = result.empty() ? first_width : other_width;
+                    for (int wi = 0; wi < static_cast<int>(words.size()); ++wi)
+                    {
+                        const auto &w = words[wi].word;
+                        const auto &ws = words[wi].ws;
+                        int unit_len = static_cast<int>(w.length() + ws.length());
+
+                        if (current_line.empty())
+                        {
+                            current_line = w + ws;
+                        }
+                        else if ((int)(current_line.length() + unit_len) <= current_width)
+                        {
+                            current_line += w + ws;
+                        }
+                        else
+                        {
+                            result.push_back(current_line);
+                            /* Strip trailing whitespace when wrapping to avoid lines ending with spaces */
+                            current_line = w + ws;
+                            current_width = other_width;
+                        }
+                    }
+                    if (!current_line.empty())
+                        result.push_back(current_line);
+                }
             }
             return result;
         }
@@ -5365,7 +5452,7 @@ namespace cpptui
                     else
                     {
                         size_t char_count = count_chars();
-                        if (cursor_char_pos_ < (int)char_count)
+                        if (cursor_char_pos_ < char_count)
                             cursor_char_pos_++;
                     }
                 }
@@ -5419,7 +5506,7 @@ namespace cpptui
                     else
                     {
                         size_t char_count = count_chars();
-                        if (cursor_char_pos_ < (int)char_count)
+                        if (cursor_char_pos_ < char_count)
                         {
                             size_t byte_pos = char_to_byte_pos(cursor_char_pos_);
                             size_t next_byte_pos = char_to_byte_pos(cursor_char_pos_ + 1);
@@ -6352,9 +6439,6 @@ namespace cpptui
 
             if (has_focus() && event.is_key_event())
             {
-                bool changed = false;
-                int current_v_idx = find_v_line(cursor_y_, cursor_x_);
-
                 // Handle Ctrl+A (Select All)
                 if (event.is_select_all())
                 {
@@ -7716,19 +7800,47 @@ namespace cpptui
 
         bool on_event(const Event &event) override
         {
-            // Delegate to children first to allow nested scrolling (e.g. TextArea in ScrollableVertical)
-            if (Container::on_event(event))
+            // Ensure non-mouse events (like keyboard navigation/typing) are still delegated
+            if (!event.is_mouse_event() && Container::on_event(event))
                 return true;
 
+            // For mouse click/release/drag/motion events, first check whether the cursor is actually
+            // inside this container's bounds. If not, let sibling panes handle it.
+            if ((event.mouse_left() || event.mouse_release() || event.mouse_drag() || event.mouse_motion()) &&
+                !(event.x >= x && event.x < x + width && event.y >= y && event.y < y + height))
+            {
+                return false;
+            }
+
+            // For mouse events, delegate only to visible children whose bounds actually intersect
+            // our clipping area. Scrolled-out-of-view children should not consume clicks meant for
+            // sibling panes. This fixes unclickable areas correlating with scroll position.
             if (event.is_mouse_event())
             {
+                bool handled = false;
+                int clip_top = y;
+                int clip_bottom = y + height - 1;
+
+                for (auto it = children_.rbegin(); it != children_.rend() && !handled; ++it)
+                {
+                    if (!(*it)->visible) continue;
+                    // Only dispatch to children whose visual area overlaps our clipping region
+                    int child_top = (*it)->y;
+                    int child_bottom = (*it)->y + (*it)->height - 1;
+                    bool in_clip_range = !(child_bottom < clip_top || child_top > clip_bottom);
+                    if (in_clip_range && (*it)->on_event(event))
+                        handled = true;
+                }
+                if (handled) return true;
+
+                // Handle scrollbar only for events within our bounds
                 if (handle_scrollbar_event(event, x, y, width, height, content_height, scroll_offset, is_dragging, false, [this]()
                                            { set_focus(true); }))
                 {
                     return true;
                 }
 
-                // Focus on Click if not handled by children (Vertical)
+                // Focus on Click only when clicking empty space within this container.
                 if (event.mouse_left())
                 {
                     if (event.x >= x && event.x < x + width && event.y >= y && event.y < y + height)
@@ -8021,7 +8133,7 @@ namespace cpptui
                 height = h;
             }
         }
-        void render(Buffer &buffer) override {}
+        void render(Buffer &) override { }
     };
 
     /// @brief Invisible horizontal spacing widget for layout padding
@@ -8036,7 +8148,7 @@ namespace cpptui
                 width = w;
             }
         }
-        void render(Buffer &buffer) override {}
+        void render(Buffer &) override { }
     };
 
     /// @brief Numeric input with optional stepper buttons
@@ -8053,8 +8165,8 @@ namespace cpptui
         int step = 1;
         int min_value = 0;
         int max_value = 100;
-        ButtonPos button_pos = ButtonPos::Right;
         bool show_buttons_ = true;
+        ButtonPos button_pos = ButtonPos::Right;
         std::function<void(int)> on_change;
 
         NumberInput(int val = 0, bool show_buttons = true, ButtonPos pos = ButtonPos::Right)
@@ -8554,9 +8666,9 @@ namespace cpptui
     {
     public:
         // Style: [ OFF ] / [ ON ] or ( ) / (*) with color
-        bool is_on = false;
         StyledText styled_label;
         std::string label;
+        bool is_on = false;
         std::function<void(bool)> on_change;
 
         // Styling
@@ -9418,7 +9530,7 @@ namespace cpptui
 
         TreeNode &add(const std::string &lbl)
         {
-            children.push_back({lbl, {}, false});
+            children.push_back({lbl, {}, false, false, "", "", "", Color()});
             return children.back();
         }
 
@@ -10828,7 +10940,6 @@ namespace cpptui
                 bool is_sel = (i == (size_t)selected_index);
 
                 std::string prefix = is_sel ? selection_indicator : std::string(utf8_display_width(selection_indicator), ' ');
-                int prefix_width = utf8_display_width(prefix);
                 int content_width = width - 4;
 
                 Color n_fg = normal_fg.resolve(Theme::current().foreground);
@@ -11274,7 +11385,7 @@ namespace cpptui
             for (int dx = 0; dx < width; ++dx)
             {
                 int data_idx = start_idx + dx;
-                if (data_idx >= data.size())
+                if (data_idx >= (int)data.size())
                     break;
 
                 float val = data[data_idx];
@@ -11419,7 +11530,7 @@ namespace cpptui
         void show() { visible_ = true; }
         void hide() { visible_ = false; }
 
-        bool contains(int px, int py) const
+        bool contains(int px, int py) const override
         {
             if (!visible_)
                 return false;
@@ -12066,7 +12177,7 @@ namespace cpptui
                 if (label_all_x_ticks && x_tick_count > 1 && draw_width > 20)
                 {
                     // Label all tick positions
-                    int label_spacing = draw_width / x_tick_count;
+                    
                     for (int t = 0; t < x_tick_count; ++t)
                     {
                         int tick_x = draw_x + (draw_width - 1) * t / (x_tick_count - 1);
@@ -12135,12 +12246,12 @@ namespace cpptui
             if (draw_height <= 0 || draw_width <= 0)
                 return;
 
-            bool needs_braille = false;
+            [[maybe_unused]] bool needs_braille = false;
             for (const auto &s : series)
                 if (s.style == LineStyle::Braille)
                     needs_braille = true;
 
-            for (int s_idx = 0; s_idx < series.size(); ++s_idx)
+            for (int s_idx = 0; s_idx < (int)series.size(); ++s_idx)
             {
                 const auto &s = series[s_idx];
                 if (s.data.empty())
@@ -12190,8 +12301,8 @@ namespace cpptui
                             // Linear Interpolation
                             int idx0 = (int)exact_idx;
                             int idx1 = idx0 + 1;
-                            if (idx1 >= s.data.size())
-                                idx1 = s.data.size() - 1;
+                            if (idx1 >= (int)s.data.size())
+                                idx1 = (int)s.data.size() - 1;
 
                             double frac = exact_idx - idx0;
                             double val = s.data[idx0] * (1.0 - frac) + s.data[idx1] * frac;
@@ -12256,8 +12367,8 @@ namespace cpptui
                             double ratio = (double)dx / (draw_width - 1);
                             data_idx = (int)(ratio * (s.data.size() - 1));
                         }
-                        if (data_idx >= s.data.size())
-                            data_idx = s.data.size() - 1;
+                        if (data_idx >= (int)s.data.size())
+                            data_idx = (int)s.data.size() - 1;
 
                         double val = s.data[data_idx];
                         double norm = (val - min_val) / (max_val - min_val);
@@ -12733,7 +12844,7 @@ namespace cpptui
                         return (int)(norm * (virtual_w - 1));
                     };
 
-                    for (int i = 0; i < s.points.size(); ++i)
+                    for (int i = 0; i < (int)s.points.size(); ++i)
                     {
                         const auto &p = s.points[i];
                         double px = p.first;
@@ -12773,7 +12884,7 @@ namespace cpptui
                 }
                 else
                 {
-                    for (int i = 0; i < s.points.size(); ++i)
+                    for (int i = 0; i < (int)s.points.size(); ++i)
                     {
                         const auto &p = s.points[i];
                         double px = p.first;
@@ -12974,7 +13085,7 @@ namespace cpptui
             int draw_x = x;
             int draw_y = y;
             int draw_width = width;
-            int draw_height = height;
+            [[maybe_unused]] int draw_height = height;
 
             // Y-Axis Labels & Margins
             int y_label_width = 6;
@@ -13145,7 +13256,7 @@ namespace cpptui
                 for (int s_idx = 0; s_idx < num_series; ++s_idx)
                 {
                     const auto &s = series[s_idx];
-                    if (c_idx >= s.values.size())
+                    if (c_idx >= (int)s.values.size())
                         continue;
 
                     double val = s.values[c_idx];
@@ -13273,9 +13384,9 @@ namespace cpptui
     class Slider : public Widget
     {
     public:
+        double value = 50.0;
         double min_value = 0.0;
         double max_value = 100.0;
-        double value = 50.0;
         double step = 1.0;
         bool vertical = false;
 
@@ -13442,8 +13553,8 @@ namespace cpptui
     public:
         StyledText styled_text;
         std::string text;
-        Color text_color = Color();
         Color badge_bg = Color();
+        Color text_color = Color();
 
         enum class Style
         {
@@ -14070,7 +14181,6 @@ namespace cpptui
 
         void render(Buffer &buffer) override
         {
-            Color bg = bg_color.resolve(Theme::current().background);
             Color h_bg = header_bg.resolve(Theme::current().panel_bg);
             Color h_fg = header_fg.resolve(Theme::current().foreground);
 
@@ -14619,7 +14729,13 @@ namespace cpptui
         {
             if (event.is_mouse_event())
             {
-                int div_pos = !vertical ? x + (int)(ratio * width) : y + (int)(ratio * height);
+                // Use the same clamped divider position as layout(), so that event handling
+                // matches where the visual divider actually renders. Otherwise clicks near
+                // the unclamped position are consumed as "near_divider" even though they're
+                // visually inside a child pane (causing dead zones where children don't receive events).
+                int div_pos = !vertical
+                    ? std::max(x + min_size1, std::min(x + width - min_size2 - 1, x + (int)(ratio * width)))
+                    : std::max(y + min_size1, std::min(y + height - min_size2 - 1, y + (int)(ratio * height)));
                 int mouse_pos = !vertical ? event.x : event.y;
                 int other_pos = !vertical ? event.y : event.x;
                 int other_start = !vertical ? y : x;
@@ -14627,7 +14743,7 @@ namespace cpptui
 
                 // Check if mouse is within bounds of the splitpane
                 bool in_bounds = other_pos >= other_start && other_pos < other_end;
-                bool near_divider = std::abs(mouse_pos - div_pos) <= 1;
+                bool near_divider = mouse_pos == div_pos;
 
                 if (event.mouse_left() && near_divider && in_bounds)
                 {
@@ -15131,7 +15247,6 @@ namespace cpptui
             // Update hover state
             if (event.is_mouse_event())
             {
-                bool was_hovered = hovered_on_toast;
                 hovered_on_toast = hit_test(event.x, event.y);
 
                 if (hovered_on_toast)
@@ -16542,7 +16657,6 @@ namespace cpptui
             }
             Color r_a = row_color_a.resolve(Theme::current().background);
             Color r_b = row_color_b.resolve(Theme::current().panel_bg);
-            Color b_col = border_color.resolve(Theme::current().border);
 
             int current_x_offset = x;
 
@@ -16628,7 +16742,7 @@ namespace cpptui
                 if (draw_y >= y + height - 2)
                     break; // Reserve 2 lines for footer (separator + controls)
 
-                bool is_empty = (r >= rows.size());
+                bool is_empty = (r >= (int)rows.size());
                 Color c_row = (r_vis % 2 == 0) ? r_a : r_b;
 
                 // Selection Highlight
@@ -17322,7 +17436,7 @@ namespace cpptui
 #else
             if (g_wakeup_pipe[1] != -1)
             {
-                char c = 1;
+                [[maybe_unused]] char c = 1;
                 // Write is non-blocking; ignore failure (pipe full means wakeup is already pending)
                 (void)write(g_wakeup_pipe[1], &c, 1);
             }
@@ -19397,3 +19511,4 @@ namespace cpptui
     };
 
 } // namespace cpptui
+
