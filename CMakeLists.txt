@@ -3,6 +3,9 @@ project(cpptui)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 
 if(MSVC)
     add_compile_options(/utf-8)

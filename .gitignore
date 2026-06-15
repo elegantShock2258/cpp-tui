@@ -9,6 +9,7 @@ Testing/
 CPackConfig.cmake
 CPackSourceConfig.cmake
 !CMakeLists.txt
+compile_commands.json
 
 # VS Code
 .vscode/
@@ -32,6 +33,7 @@ Thumbs.db
 *_demo
 *_sim
 *_logger
+.cache/
 
 # Jekyll
 docs/_site/
