@@ -803,6 +803,7 @@ int main() {
     notif->max_visible = 3;
 
     auto h_notif = std::make_shared<Horizontal>();
+    h_notif->fixed_height = 1;
 
     h_notif->add(make_notif_button("Info", notif, Notification::Type::Info,
                                    "Information message displayed!"));
@@ -922,6 +923,7 @@ int main() {
     pbar3->show_text = true;
     pbar3->color = {100, 255, 100};
     pbar3->empty_color = {60, 60, 60};
+    pbar3->fixed_height = 3;
     sv->add(pbar3);
 
     sv->add(std::make_shared<Label>("Text Overlay (Custom & Centered):"));
@@ -943,7 +945,7 @@ int main() {
     sv->add(std::make_shared<Label>("Indeterminate Spinners:",
                                     Theme::current().primary));
     auto row_ind = std::make_shared<Horizontal>();
-    row_ind->height = 1;
+    row_ind->fixed_height = 1;
 
     auto sp_dots = std::make_shared<Spinner>(&app, Spinner::StyleBrailleSpin());
     add_spinner_with_label(row_ind, "Braille: ", 9, sp_dots);
@@ -971,7 +973,7 @@ int main() {
     sv->add(std::make_shared<Label>("Determinate Spinners:",
                                     Theme::current().primary));
     auto row_det = std::make_shared<Horizontal>();
-    row_det->height = 1;
+    row_det->fixed_height = 1;
 
     // Braille (uses value to show progress, but still spins)
     sp_dots_det = std::make_shared<Spinner>(&app, Spinner::StyleBrailleSpin());

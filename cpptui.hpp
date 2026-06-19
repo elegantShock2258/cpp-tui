@@ -34,7 +34,7 @@ namespace cpptui {
 
 constexpr int VERSION_MAJOR = 1;
 constexpr int VERSION_MINOR = 7;
-constexpr int VERSION_PATCH = 0;
+constexpr int VERSION_PATCH = 1;
 
 inline std::string version() {
   return std::to_string(VERSION_MAJOR) + "." + std::to_string(VERSION_MINOR) +
@@ -4084,6 +4084,8 @@ class Button : public Widget {
   Button(StyledText label, std::function<void()> on_click = {})
       : styled_label_(label), label_(label.plain_text()), on_click_(on_click) {
     focusable = true;
+    height = 1;
+    fixed_height = 1;
   }
 
   std::function<void()> on_double_click;
@@ -4332,6 +4334,8 @@ class Input : public Widget
   Input() {
     focusable = true;
     selection_state_.inclusive_drag = false;
+    height = 1;
+    fixed_height = 1;
   }
 
   // Configuration
@@ -9615,7 +9619,10 @@ class ProgressBar : public Widget {
   Alignment text_alignment = Alignment::Center;
   std::function<std::string(float)> text_formatter;
 
-  ProgressBar(float val = 0.0f) : value(val) {}
+  ProgressBar(float val = 0.0f) : value(val) {
+    height = 1;
+    fixed_height = 1;
+  }
 
   void render(Buffer &buffer) override {
     int filled_width = static_cast<int>(width * value);
@@ -9657,42 +9664,43 @@ class ProgressBar : public Widget {
       }
     }
 
-    for (int dx = 0; dx < width; ++dx) {
-      // Check if we are drawing a text character at this position
-      bool is_text = false;
-      char text_char = ' ';
+    int text_y = render_height / 2;
 
-      if (show_text && dx >= text_start_x &&
-          dx < text_start_x + static_cast<int>(text_str.length())) {
-        is_text = true;
-        text_char = text_str[dx - text_start_x];
-      }
+    for (int dy = 0; dy < render_height; ++dy) {
+      for (int dx = 0; dx < width; ++dx) {
+        // Check if we are drawing a text character at this position on this row
+        bool is_text = false;
+        char text_char = ' ';
 
-      Cell c;
-      if (dx < filled_width) {
-        // Filled part
-        if (is_text) {
-          c.content = std::string(1, text_char);
-          c.fg_color = t_col;
-          c.bg_color = c_col;  // Use filled color as background for text
-        } else {
-          c.content = char_filled;
-          c.fg_color = c_col;
+        if (show_text && dy == text_y && dx >= text_start_x &&
+            dx < text_start_x + static_cast<int>(text_str.length())) {
+          is_text = true;
+          text_char = text_str[dx - text_start_x];
         }
-      } else {
-        // Empty part
-        if (is_text) {
-          c.content = std::string(1, text_char);
-          c.fg_color = t_col;
-          c.bg_color = e_col;  // Use empty color as background for text
-        } else {
-          c.content = char_empty;
-          c.fg_color = e_col;
-        }
-      }
 
-      // Draw full height (respecting max_height)
-      for (int dy = 0; dy < render_height; ++dy) {
+        Cell c;
+        if (dx < filled_width) {
+          // Filled part
+          if (is_text) {
+            c.content = std::string(1, text_char);
+            c.fg_color = t_col;
+            c.bg_color = c_col;  // Use filled color as background for text
+          } else {
+            c.content = char_filled;
+            c.fg_color = c_col;
+          }
+        } else {
+          // Empty part
+          if (is_text) {
+            c.content = std::string(1, text_char);
+            c.fg_color = t_col;
+            c.bg_color = e_col;  // Use empty color as background for text
+          } else {
+            c.content = char_empty;
+            c.fg_color = e_col;
+          }
+        }
+
         buffer.set(x + dx, y + dy, c);
       }
     }
@@ -9705,6 +9713,7 @@ class Checkbox : public Widget {
   Checkbox(StyledText label, bool checked = false)
       : styled_label_(label), label_(label.plain_text()), checked_(checked) {
     height = 1;
+    fixed_height = 1;
     focusable = true;
   }
 
@@ -12834,6 +12843,14 @@ class Calendar : public Container {
 
   void update_header() {
     // Update button labels if needed
+  }
+
+  void update_responsive() override {
+    int num_rows = calculate_rows();
+    int content_height = 2 + num_rows;
+    fixed_height = show_border ? content_height + 2 : content_height;
+    fixed_width = show_border ? 23 : 21;
+    Container::update_responsive();
   }
 
   void layout() override {
@@ -16076,6 +16093,8 @@ class Spinner : public Widget {
   Spinner(App *app = nullptr, const Style &s = StyleBrailleSpin()) : app_(app) {
     style = s;
     autosize();
+    height = 1;
+    fixed_height = 1;
     pending_timer_check_ = true;
   }
 
