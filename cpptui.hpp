@@ -34,7 +34,7 @@ namespace cpptui {
 
 constexpr int VERSION_MAJOR = 1;
 constexpr int VERSION_MINOR = 6;
-constexpr int VERSION_PATCH = 1;
+constexpr int VERSION_PATCH = 2;
 
 inline std::string version() {
   return std::to_string(VERSION_MAJOR) + "." + std::to_string(VERSION_MINOR) +

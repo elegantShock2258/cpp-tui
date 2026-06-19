@@ -436,6 +436,7 @@ para->bold = true;
 | `first_line_indent` | `int` | Indentation for the first line |
 | `hanging_indent` | `int` | Indentation for subsequent lines |
 | `word_wrap` | `bool` | Enable/disable word wrapping |
+| `preserve_whitespace` | `bool` | Preserve exact spacing during wrapping (default `false`) |
 | `bold` / `italic` / `underline` | `bool` | Global style toggles |
 
 <p class="back-to-top"><a href="#api-reference">↑ Back to top</a></p>
