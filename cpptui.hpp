@@ -14946,13 +14946,35 @@ class App {
     bool ctrl;
     bool alt;
     bool shift;
+
+    bool operator==(const KeyBinding& other) const {
+      return key== other.key && ctrl == other.ctrl && alt == other.alt && shift == other.shift;
+    }
   };
+
+  struct KeyBindingHash {
+    std::size_t operator()(const KeyBinding& k) const noexcept {
+      int modifiers = (k.ctrl<<2)| (k.alt << 1) | k.shift;
+      auto a = std::hash<int>{}(k.key);
+      auto b = std::hash<int>{}(modifiers);
+
+      return a ^ (b+0x9e3779b9 + (a<<6) + (a>>2));
+    }
+  };
+
   std::vector<KeyBinding> exit_keys_;
+  std::unordered_map<KeyBinding,std::function<void()>,KeyBindingHash> key_events_;
 
   /// @brief Register a key that will exit the application
   void register_exit_key(int key, bool ctrl = false, bool alt = false,
                          bool shift = false) {
     exit_keys_.push_back({key, ctrl, alt, shift});
+  }
+
+  /// @brief Register a key that will execute a CallBack function
+  void register_key(int key,std::function<void()> callback ,bool ctrl = false, bool alt = false,
+                         bool shift = false) {
+    key_events_[{key,ctrl,alt,shift}] = callback;
   }
 
   // Dialog Stack
@@ -15425,7 +15447,15 @@ class App {
           continue;
         }
 
-        // 5. Root Dispatch (Spatial or unhandled keys)
+        // 5. Consume Registered Keys
+        if (event.is_key_event()) {
+          KeyBinding kv = {event.key,event.ctrl,event.alt,event.shift};
+
+          if (key_events_.count(kv)) {
+            key_events_[kv]();
+          }
+        }
+        // 6. Root Dispatch (Spatial or unhandled keys)
         if (event.is_mouse_event() || event.is_key_event() ||
             event.type == EventType::Paste) {
           if (event.is_mouse_event()) {
